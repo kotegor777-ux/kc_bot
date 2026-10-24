@@ -29,6 +29,7 @@ class ReportFSM(StatesGroup):
     waiting_for_file = State()
     waiting_for_group_number = State()
     waiting_for_staff_numbers = State()
+    waiting_for_gp_average = State()
     waiting_for_tags_file = State()
 
 user_sessions = {}
@@ -107,7 +108,8 @@ async def handle_group_number(message: Message, state: FSMContext):
     report_type = session.get("type")
     
     if report_type == "Анализ группы":
-        await process_report(message, state, session, is_analysis=True)
+        await message.answer("Введите среднее (Конва) по ГП (например: 4.92):")
+        await state.set_state(ReportFSM.waiting_for_gp_average)
     else:
         await message.answer("Введите Штат и Кол-во человек (или смен) через пробел (например: 24 16):")
         await state.set_state(ReportFSM.waiting_for_staff_numbers)
@@ -119,13 +121,22 @@ async def handle_staff_numbers(message: Message, state: FSMContext):
         session = user_sessions.get(message.from_user.id, {})
         session["shtat"] = shtat
         session["smena"] = smena
-        await process_report(message, state, session, is_analysis=False)
+        await message.answer("Введите среднее (Конва) по ГП (например: 4.92):")
+        await state.set_state(ReportFSM.waiting_for_gp_average)
     except ValueError:
         await message.answer("Ошибка формата. Введите два числа через пробел:")
 
-async def process_report(message: Message, state: FSMContext, session: dict, is_analysis: bool):
-    df_all = session.get("df")
+@dp.message(ReportFSM.waiting_for_gp_average)
+async def handle_gp_average(message: Message, state: FSMContext):
+    session = user_sessions.get(message.from_user.id, {})
+    gp_avg_text = message.text.strip().replace(',', '.')
+    report_type = session.get("type")
     target_group = session.get("target_group", "47")
+    
+    try: gp_avg_val = float(gp_avg_text)
+    except ValueError: gp_avg_val = 0.0
+
+    df_all = session.get("df")
     shtat = session.get("shtat", 1)
     smena = session.get("smena", 1)
     
@@ -138,39 +149,18 @@ async def process_report(message: Message, state: FSMContext, session: dict, is_
             
     df_target_full = df_all[df_all['Ответственный'].astype(str).str.contains(target_group, na=False)].copy()
     
+    if report_type == "Анализ группы":
+        analysis_text = generate_analysis_text(df_target_full, gp_avg_val, target_group)
+        for chunk in split_text(analysis_text):
+            await message.answer(chunk, parse_mode="HTML")
+        await state.clear()
+        return
+
     def safe_sum_name(df, substr):
         col = next((c for c in df.columns if substr.lower() in str(c).lower()), None)
         if not col: return 0
         s = df[col].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
         return pd.to_numeric(s, errors='coerce').sum()
-
-    # АВТОМАТИЧЕСКИЙ РАСЧЕТ СРЕДНЕГО ПО ПРОЕКТУ (КОНВА ГП)
-    gp_avg_val = 0.0
-    project_name_text = ""
-    col_group = next((c for c in df_all.columns if c.lower() == 'группа'), None)
-    
-    if col_group and not df_target_full.empty:
-        project_name = df_target_full[col_group].mode()[0]
-        project_name_text = project_name
-        df_project = df_all[df_all[col_group] == project_name]
-        
-        sum_usp_proj = safe_sum_name(df_project, 'успешные')
-        sum_vs_proj = safe_sum_name(df_project, 'всего')
-        sum_ned_proj = safe_sum_name(df_project, 'недозвон')
-        sum_nek_proj = safe_sum_name(df_project, 'некор') 
-        prinyatye_proj = sum_vs_proj - sum_ned_proj - sum_nek_proj
-        
-        if prinyatye_proj > 0:
-            gp_avg_val = (sum_usp_proj / prinyatye_proj) * 100
-
-    gp_avg_text = f"{gp_avg_val:.2f}"
-
-    if is_analysis:
-        analysis_text = generate_analysis_text(df_target_full, gp_avg_val, target_group, project_name_text)
-        for chunk in split_text(analysis_text):
-            await message.answer(chunk, parse_mode="HTML")
-        await state.clear()
-        return
 
     try:
         sum_usp = safe_sum_name(df_target_full, 'успешные')
@@ -203,8 +193,7 @@ async def process_report(message: Message, state: FSMContext, session: dict, is_
     await message.answer_photo(photo=BufferedInputFile(image_bytes.read(), filename="report.jpg"), caption=f"Срез по группе {target_group}")
     await state.clear()
 
-
-def generate_analysis_text(df, gp_avg, target_group, project_name):
+def generate_analysis_text(df, gp_avg, target_group):
     if df.empty: return f"Нет данных по {target_group} группе."
     
     def clean_pct(val):
@@ -227,8 +216,7 @@ def generate_analysis_text(df, gp_avg, target_group, project_name):
     col_dozvon = next((c for c in df.columns if 'дозвона' in str(c).lower()), None)
     col_cr = next((c for c in df.columns if 'успешных по' in str(c).lower()), None)
 
-    report_lines = [f"📊 <b>Анализ операторов группы {target_group}</b>"]
-    report_lines.append(f"<i>Проект: {project_name} | Средняя конва по ГП: {gp_avg:.2f}%</i>\n")
+    report_lines = [f"📊 <b>Анализ операторов группы {target_group}</b>\n"]
     
     for _, row in df.iterrows():
         fio = str(row.get('ФИО', 'Неизвестно')).split('(')[0].strip()
@@ -261,7 +249,7 @@ def generate_analysis_text(df, gp_avg, target_group, project_name):
             report_lines.extend(issues)
             report_lines.append("") 
             
-    if len(report_lines) <= 2:
+    if len(report_lines) == 1:
         return report_lines[0] + "\n✅ У всех операторов группы показатели в норме!"
         
     return "\n".join(report_lines).strip()
