@@ -98,47 +98,66 @@ async def handle_file(message: Message, state: FSMContext):
         await process_comparative_report(message, df, "неделя" in report_type)
         await state.clear()
     else:
-        await message.answer("Введите номер вашей группы (например: 47):")
+        await message.answer("Введите номер(а) группы через запятую (например: 47, 31, 29):")
         await state.set_state(ReportFSM.waiting_for_group_number)
 
 @dp.message(ReportFSM.waiting_for_group_number)
 async def handle_group_number(message: Message, state: FSMContext):
     session = user_sessions.get(message.from_user.id, {})
-    session["target_group"] = message.text.strip()
+    # Сохраняем список групп, убирая лишние пробелы
+    groups = [g.strip() for g in message.text.split(',')]
+    session["target_groups"] = groups
     report_type = session.get("type")
     
     if report_type == "Анализ группы":
-        await message.answer("Введите среднее (Конва) по ГП (например: 4.92):")
+        await message.answer("Введите среднее (Конва) по ГП через пробел (например: 4.81 3.2 2.8):")
         await state.set_state(ReportFSM.waiting_for_gp_average)
     else:
-        await message.answer("Введите Штат и Кол-во человек (или смен) через пробел (например: 24 16):")
+        await message.answer("Введите Штат и Кол-во человек (или смен) через пробел (если несколько групп, можно ввести подряд: 24 16 10 5):")
         await state.set_state(ReportFSM.waiting_for_staff_numbers)
 
 @dp.message(ReportFSM.waiting_for_staff_numbers)
 async def handle_staff_numbers(message: Message, state: FSMContext):
     try:
-        shtat, smena = map(int, message.text.split())
+        parts = message.text.replace(',', ' ').split()
+        staff_data = []
+        for i in range(0, len(parts), 2):
+            if i+1 < len(parts):
+                staff_data.append((int(parts[i]), int(parts[i+1])))
+        
+        if not staff_data:
+            raise ValueError
+            
         session = user_sessions.get(message.from_user.id, {})
-        session["shtat"] = shtat
-        session["smena"] = smena
-        await message.answer("Введите среднее (Конва) по ГП (например: 4.92):")
+        session["staff_data"] = staff_data
+        await message.answer("Введите среднее (Конва) по ГП через пробел (например: 4.81 3.2 2.8):")
         await state.set_state(ReportFSM.waiting_for_gp_average)
     except ValueError:
-        await message.answer("Ошибка формата. Введите два числа через пробел:")
+        await message.answer("Ошибка формата. Введите пары чисел через пробел:")
 
 @dp.message(ReportFSM.waiting_for_gp_average)
 async def handle_gp_average(message: Message, state: FSMContext):
     session = user_sessions.get(message.from_user.id, {})
-    gp_avg_text = message.text.strip().replace(',', '.')
-    report_type = session.get("type")
-    target_group = session.get("target_group", "47")
+    gp_text_cleaned = message.text.replace(',', '.').split()
     
-    try: gp_avg_val = float(gp_avg_text)
-    except ValueError: gp_avg_val = 0.0
+    gp_averages = []
+    for val in gp_text_cleaned:
+        try: gp_averages.append(float(val))
+        except ValueError: pass
+    
+    if not gp_averages: gp_averages = [0.0]
+    session["gp_averages"] = gp_averages
+    
+    report_type = session.get("type")
+    is_analysis = (report_type == "Анализ группы")
+    
+    await process_report(message, state, session, is_analysis)
 
+async def process_report(message: Message, state: FSMContext, session: dict, is_analysis: bool):
     df_all = session.get("df")
-    shtat = session.get("shtat", 1)
-    smena = session.get("smena", 1)
+    target_groups = session.get("target_groups", ["47"])
+    gp_averages = session.get("gp_averages", [0.0])
+    staff_data = session.get("staff_data", [(1, 1)])
     
     df_all.columns = [str(c).strip() for c in df_all.columns]
     rename_dict = {}
@@ -147,50 +166,59 @@ async def handle_gp_average(message: Message, state: FSMContext):
         elif 'последнее' in col.lower(): rename_dict[col] = 'Последнее действие'
     df_all.rename(columns=rename_dict, inplace=True)
             
-    df_target_full = df_all[df_all['Ответственный'].astype(str).str.contains(target_group, na=False)].copy()
-    
-    if report_type == "Анализ группы":
-        analysis_text = generate_analysis_text(df_target_full, gp_avg_val, target_group)
-        for chunk in split_text(analysis_text):
+    for idx, target_group in enumerate(target_groups):
+        gp_avg_val = gp_averages[idx] if idx < len(gp_averages) else (gp_averages[-1] if gp_averages else 0.0)
+        gp_avg_text = f"{gp_avg_val:.2f}"
+        shtat, smena = staff_data[idx] if idx < len(staff_data) else (staff_data[-1] if staff_data else (1, 1))
+        
+        df_target_full = df_all[df_all['Ответственный'].astype(str).str.contains(target_group, na=False)].copy()
+        
+        if df_target_full.empty:
+            await message.answer(f"Нет данных по группе {target_group}.")
+            continue
+
+        if is_analysis:
+            analysis_text = generate_analysis_text(df_target_full, gp_avg_val, target_group)
+            for chunk in split_text(analysis_text):
+                await message.answer(chunk, parse_mode="HTML")
+            continue
+
+        def safe_sum_name(df, substr):
+            col = next((c for c in df.columns if substr.lower() in str(c).lower()), None)
+            if not col: return 0
+            s = df[col].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
+            return pd.to_numeric(s, errors='coerce').sum()
+
+        try:
+            sum_usp = safe_sum_name(df_target_full, 'успешные')
+            sum_vsego = safe_sum_name(df_target_full, 'всего')
+            sum_nedozvon = safe_sum_name(df_target_full, 'недозвон')
+            sum_nekor = safe_sum_name(df_target_full, 'некор') 
+            sum_prinyatye = sum_vsego - sum_nedozvon - sum_nekor
+            real_avg_usp = (sum_usp / sum_prinyatye * 100) if sum_prinyatye > 0 else None
+        except Exception: real_avg_usp = None
+            
+        try:
+            sum_vsego = safe_sum_name(df_target_full, 'всего')
+            sum_nedozvon = safe_sum_name(df_target_full, 'недозвон')
+            real_avg_dozvon = ((sum_vsego - sum_nedozvon) / sum_vsego * 100) if sum_vsego > 0 else None
+        except Exception: real_avg_dozvon = None
+            
+        text_report = generate_group_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon, target_group)
+        for chunk in split_text(text_report):
             await message.answer(chunk, parse_mode="HTML")
-        await state.clear()
-        return
-
-    def safe_sum_name(df, substr):
-        col = next((c for c in df.columns if substr.lower() in str(c).lower()), None)
-        if not col: return 0
-        s = df[col].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
-        return pd.to_numeric(s, errors='coerce').sum()
-
-    try:
-        sum_usp = safe_sum_name(df_target_full, 'успешные')
-        sum_vsego = safe_sum_name(df_target_full, 'всего')
-        sum_nedozvon = safe_sum_name(df_target_full, 'недозвон')
-        sum_nekor = safe_sum_name(df_target_full, 'некор') 
-        sum_prinyatye = sum_vsego - sum_nedozvon - sum_nekor
-        real_avg_usp = (sum_usp / sum_prinyatye * 100) if sum_prinyatye > 0 else None
-    except Exception: real_avg_usp = None
         
-    try:
-        sum_vsego = safe_sum_name(df_target_full, 'всего')
-        sum_nedozvon = safe_sum_name(df_target_full, 'недозвон')
-        real_avg_dozvon = ((sum_vsego - sum_nedozvon) / sum_vsego * 100) if sum_vsego > 0 else None
-    except Exception: real_avg_dozvon = None
+        columns_to_keep = ['ФИО', 'Рабочее время', 'Время перерывов', '% у рабочего места', 
+                           '% дозвона до человека', '% успешных по дозвону', 'Успешные', 'Всего']
+        if 'ЗП' in df_all.columns: columns_to_keep.append('ЗП')
+        if 'Последнее действие' in df_all.columns: columns_to_keep.append('Последнее действие')
+                           
+        existing_cols = [c for c in columns_to_keep if c in df_target_full.columns]
+        df_target = df_target_full[existing_cols]
+            
+        image_bytes = render_dataframe_to_image(df_target, gp_avg_val, real_avg_usp, real_avg_dozvon)
+        await message.answer_photo(photo=BufferedInputFile(image_bytes.read(), filename="report.jpg"), caption=f"Срез по группе {target_group}")
         
-    text_report = generate_group_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon, target_group)
-    for chunk in split_text(text_report):
-        await message.answer(chunk, parse_mode="HTML")
-    
-    columns_to_keep = ['ФИО', 'Рабочее время', 'Время перерывов', '% у рабочего места', 
-                       '% дозвона до человека', '% успешных по дозвону', 'Успешные', 'Всего']
-    if 'ЗП' in df_all.columns: columns_to_keep.append('ЗП')
-    if 'Последнее действие' in df_all.columns: columns_to_keep.append('Последнее действие')
-                       
-    existing_cols = [c for c in columns_to_keep if c in df_target_full.columns]
-    df_target = df_target_full[existing_cols]
-        
-    image_bytes = render_dataframe_to_image(df_target, gp_avg_val, real_avg_usp, real_avg_dozvon)
-    await message.answer_photo(photo=BufferedInputFile(image_bytes.read(), filename="report.jpg"), caption=f"Срез по группе {target_group}")
     await state.clear()
 
 def generate_analysis_text(df, gp_avg, target_group):
