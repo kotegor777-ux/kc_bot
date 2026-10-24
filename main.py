@@ -9,8 +9,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
-BOT_TOKEN = "ВАШ_ТОКЕН"
-bot = Bot(token=BOT_TOKEN)
+BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
+bot = Bot(token=B8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A)
 dp = Dispatcher()
 
 main_kb = ReplyKeyboardMarkup(
