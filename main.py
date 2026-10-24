@@ -72,23 +72,36 @@ async def handle_staff_numbers(message: Message, state: FSMContext):
 @dp.message(ReportFSM.waiting_for_gp_average)
 async def handle_gp_average(message: Message, state: FSMContext):
     session = user_sessions.get(message.from_user.id, {})
-    gp_avg = message.text.strip()
+    gp_avg_text = message.text.strip().replace(',', '.')
+    
+    try:
+        gp_avg_val = float(gp_avg_text)
+    except ValueError:
+        gp_avg_val = 0.0
+
     df_all = session.get("df")
     shtat = session.get("shtat")
     smena = session.get("smena")
     
-    # Текстовый отчет
-    text_report = generate_group_text(df_all, shtat, smena, gp_avg)
+    text_report = generate_group_text(df_all, shtat, smena, gp_avg_text)
     await message.answer(text_report, parse_mode="HTML")
     
-    # Скриншот таблицы
-    df_47 = df_all[df_all['Ответственный'].astype(str).str.contains('47', na=False)].copy()
-    columns_to_keep = ['ФИО', 'Рабочее время', 'Время перерывов', '% у рабочего места', 
-                       '% дозвона до человека', '% успешных по дозвону', 'Успешные', 'Всего']
-    if set(columns_to_keep).issubset(df_47.columns):
-        df_47 = df_47[columns_to_keep]
+    # Переименовываем колонку для краткости, если она называется "За период"
+    if 'За период' in df_all.columns:
+        df_all = df_all.rename(columns={'За период': 'ЗП'})
         
-    image_bytes = render_dataframe_to_image(df_47)
+    df_47 = df_all[df_all['Ответственный'].astype(str).str.contains('47', na=False)].copy()
+    
+    # Добавлены новые колонки ЗП и Последнее время действия
+    columns_to_keep = ['ФИО', 'Рабочее время', 'Время перерывов', '% у рабочего места', 
+                       '% дозвона до человека', '% успешных по дозвону', 'Успешные', 'Всего', 
+                       'ЗП', 'Последнее время действия']
+                       
+    existing_cols = [c for c in columns_to_keep if c in df_47.columns]
+    df_47 = df_47[existing_cols]
+        
+    # Передаем gp_avg_val для расчета 4 порогов окрашивания
+    image_bytes = render_dataframe_to_image(df_47, gp_avg_val)
     await message.answer_photo(photo=BufferedInputFile(image_bytes.read(), filename="report.jpg"), caption="Срез по группе")
     await state.set_state(ReportFSM.waiting_for_report_type)
 
@@ -148,10 +161,11 @@ def generate_group_text(df_all, shtat, smena, gp_avg):
 Конва по ГП: <b>{gp_avg}</b>
 """
 
-def render_dataframe_to_image(df_original):
+def render_dataframe_to_image(df_original, gp_avg=0.0):
     df = df_original.copy()
-    pct_cols = ['% у рабочего места', '% дозвона до человека', '% успешных по дозвону']
-    numeric_cols = ['Успешные', 'Всего']
+    
+    pct_cols = [c for c in ['% у рабочего места', '% дозвона до человека', '% успешных по дозвону'] if c in df.columns]
+    numeric_cols = [c for c in ['Успешные', 'Всего', 'ЗП'] if c in df.columns]
 
     for col in pct_cols:
         val = pd.to_numeric(df[col].astype(str).str.replace('%', '').str.replace(',', '.'), errors='coerce')
@@ -160,11 +174,9 @@ def render_dataframe_to_image(df_original):
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Сортировка по убыванию
     if '% успешных по дозвону' in df.columns:
         df = df.sort_values(by='% успешных по дозвону', ascending=False).reset_index(drop=True)
 
-    # Расчет строки СРЕДНЕЕ
     avg_row = {col: '' for col in df.columns}
     avg_row['ФИО'] = 'СРЕДНЕЕ'
     for col in pct_cols + numeric_cols:
@@ -172,27 +184,28 @@ def render_dataframe_to_image(df_original):
     
     df = pd.concat([df, pd.DataFrame([avg_row])], ignore_index=True)
     
-    # Форматирование отображения
     display_df = df.copy()
     for col in pct_cols:
         display_df[col] = display_df[col].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) and x != '' else "")
     for col in numeric_cols:
         display_df[col] = display_df[col].apply(lambda x: f"{x:.0f}" if pd.notnull(x) and x != '' else "")
 
-    # Увеличенная ширина всей картинки
-    fig, ax = plt.subplots(figsize=(18, len(df) * 0.4 + 1))
+    for col in df.columns:
+        if col not in pct_cols and col not in numeric_cols and col != 'ФИО':
+            display_df[col] = display_df[col].fillna('').astype(str)
+
+    # Увеличена ширина холста, чтобы вместить все колонки
+    fig, ax = plt.subplots(figsize=(24, len(df) * 0.4 + 1))
     ax.axis('off')
 
-    # Жестко задаем ширину колонок (ФИО = 28% ширины, остальные делят остаток)
     cols_count = len(display_df.columns)
-    col_widths = [0.28] + [0.72 / (cols_count - 1)] * (cols_count - 1)
+    col_widths = [0.22] + [0.78 / (cols_count - 1)] * (cols_count - 1)
 
     table = ax.table(cellText=display_df.values, colLabels=display_df.columns, loc='center', cellLoc='center', colWidths=col_widths)
     table.auto_set_font_size(False)
     table.set_fontsize(9)
     table.scale(1.2, 1.6)
 
-    # Тепловая карта и стилизация
     cmap = plt.get_cmap('RdYlGn')
     for i, col in enumerate(df.columns):
         if col in pct_cols + numeric_cols:
@@ -202,15 +215,22 @@ def render_dataframe_to_image(df_original):
                 for j in range(len(df) - 1):
                     val = df.iloc[j][col]
                     if pd.notnull(val) and val != '':
-                        table[(j+1, i)].set_facecolor(cmap(norm(float(val))))
+                        # Применение 4 порогов (5 цветов) исключительно для успешных по дозвону
+                        if col == '% успешных по дозвону' and gp_avg > 0:
+                            t1, t2, t3, t4 = gp_avg * 0.70, gp_avg * 0.85, gp_avg * 1.15, gp_avg * 1.30
+                            if val < t1: bg_color = "#e06666"      # Красный
+                            elif val < t2: bg_color = "#f6b26b"    # Оранжевый
+                            elif val < t3: bg_color = "#ffd966"    # Желтый
+                            elif val < t4: bg_color = "#93c47d"    # Светло-зеленый
+                            else: bg_color = "#6aa84f"             # Темно-зеленый
+                            table[(j+1, i)].set_facecolor(bg_color)
+                        else:
+                            table[(j+1, i)].set_facecolor(cmap(norm(float(val))))
         
-        # Шапка
         table[(0, i)].set_facecolor("#4C566A")
         table[(0, i)].get_text().set_color("white")
-        # Строка СРЕДНЕЕ
         table[(len(df), i)].set_facecolor("#D8BFD8")
         
-        # Выравнивание длинного ФИО по левому краю
         if col == 'ФИО':
             for j in range(len(df) + 1):
                 table[(j, i)].get_text().set_horizontalalignment('left')
@@ -220,7 +240,6 @@ def render_dataframe_to_image(df_original):
     buf.seek(0)
     plt.close()
     return buf
-
 async def process_comparative_report(message: Message, df: pd.DataFrame, is_weekly: bool):
     # Логика сравнительного отчета остается без изменений
     df['Номер_Группы'] = df['Ответственный'].astype(str).str.extract(r'(\d{2})')
