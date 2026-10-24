@@ -211,8 +211,8 @@ def render_dataframe_to_image(df_original, gp_avg=0.0):
     table.set_fontsize(9)
     table.scale(1.2, 1.6)
 
-    # Палитра Google Sheets: Красный - Белый - Зеленый
-    rwg_cmap = mcolors.LinearSegmentedColormap.from_list("rwg", ["#ea9999", "#ffffff", "#93c47d"])
+    # Обновленная палитра градиента из ваших скриншотов
+    rwg_cmap = mcolors.LinearSegmentedColormap.from_list("rwg", ["#f4cccc", "#ffffff", "#77c38d"])
     
     norm_dict = {}
     for col in pct_cols + numeric_cols:
@@ -228,36 +228,31 @@ def render_dataframe_to_image(df_original, gp_avg=0.0):
             val = df.iloc[j][col]
             bg_color = "white"
             
-            # Заливка строки СРЕДНЕЕ (светло-фиолетовый как в шаблоне)
             if is_avg_row:
                 bg_color = "#d9d2e9"
             
-            # Логика для числовых ячеек (исключая пустые)
             if pd.notnull(val) and val != '':
                 v = pd.to_numeric(val, errors='coerce')
                 if pd.notnull(v):
-                    # 1. Точные пороги ТОЛЬКО для колонки "% успешных по дозвону"
+                    # Точные пороги по вашей палитре
                     if col == usp_col and gp_avg > 0:
                         t1, t2, t3, t4 = gp_avg * 0.70, gp_avg * 0.85, gp_avg * 1.15, gp_avg * 1.30
-                        if v < t1: bg_color = "#ea9999"      # Красный
-                        elif v < t2: bg_color = "#f9cb9c"    # Оранжевый
-                        elif v < t3: bg_color = "#ffe599"    # Желтый
-                        elif v < t4: bg_color = "#b6d7a8"    # Светло-зеленый
-                        else: bg_color = "#57bb8a"           # Темно-зеленый
+                        if v < t1: bg_color = "#f4cccc"      # Розовый
+                        elif v < t2: bg_color = "#fce5cd"    # Оранжевый
+                        elif v < t3: bg_color = "#fff2cc"    # Желтый
+                        elif v < t4: bg_color = "#b7e1cd"    # Светло-зеленый
+                        else: bg_color = "#77c38d"           # Темно-зеленый
                     
-                    # 2. Градиент для ФИО и времени на основе "% успешных по дозвону"
                     elif col in ['ФИО', 'Рабочее время', 'Время перерывов'] and not is_avg_row:
                         row_usp = pd.to_numeric(df.iloc[j][usp_col], errors='coerce')
                         if pd.notnull(row_usp) and usp_col in norm_dict:
                             bg_color = mcolors.to_hex(rwg_cmap(norm_dict[usp_col](row_usp)))
                             
-                    # 3. Стандартный градиент для остальных числовых колонок
                     elif col in pct_cols + numeric_cols and col in norm_dict and not is_avg_row:
                         bg_color = mcolors.to_hex(rwg_cmap(norm_dict[col](v)))
 
             table[(j+1, i)].set_facecolor(bg_color)
         
-        # Шапка таблицы (светло-фиолетовый, черный текст)
         table[(0, i)].set_facecolor("#d9d2e9")
         table[(0, i)].get_text().set_color("black")
         
