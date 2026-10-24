@@ -98,7 +98,6 @@ async def handle_gp_average(message: Message, state: FSMContext):
         s = df[col].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
         return pd.to_numeric(s, errors='coerce').sum()
 
-    # Точный расчет конверсии: (Успешные / (Всего - Недозвон - Некорректные)) * 100
     try:
         sum_usp = safe_sum_name(df_47_full, 'успешные')
         sum_vsego = safe_sum_name(df_47_full, 'всего')
@@ -110,7 +109,6 @@ async def handle_gp_average(message: Message, state: FSMContext):
     except Exception:
         real_avg_usp = None
         
-    # Точный расчет дозвона: ((Всего - Недозвоны) / Всего) * 100
     try:
         sum_vsego = safe_sum_name(df_47_full, 'всего')
         sum_nedozvon = safe_sum_name(df_47_full, 'недозвон')
@@ -166,17 +164,27 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
     plan_vyhod = (smena / shtat) * 100 if shtat > 0 else 0
     fact_vyhod = (fact_vyhod_count / shtat) * 100 if shtat > 0 else 0
     
-    # От 100 звонков (где 'Всего' >= 100)
     over_100_calls = len(df[vsego_series >= 100])
-    
-    # Расчет КПП (где '% у рабочего места' > 0 и <= 80)
     kpp_count = len(df[(avg_rab_mesto_series > 0) & (avg_rab_mesto_series <= 80)])
 
     def time_to_seconds(t_str):
+        if pd.isnull(t_str): return 0
+        v = str(t_str).strip()
         try:
-            parts = str(t_str).split(':')
-            if len(parts) == 3:
-                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            if v.startswith('1900-01-'):
+                d_str, time_part = v.split(' ')
+                days = int(d_str.split('-')[2])
+                h, m, s = map(float, time_part.split(':'))
+                return days * 24 * 3600 + h * 3600 + m * 60 + s
+            elif 'day' in v:
+                parts = v.split(' ')
+                days = int(parts[0])
+                h, m, s = map(float, parts[-1].split(':'))
+                return days * 24 * 3600 + h * 3600 + m * 60 + s
+            
+            parts = v.split(':')
+            if len(parts) >= 3:
+                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
         except:
             pass
         return 0
@@ -243,6 +251,25 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
         df = df.sort_values(by='% успешных по дозвону', ascending=False).reset_index(drop=True)
     
     display_df = df.copy()
+    
+    def fix_time_format(val):
+        if pd.isnull(val): return ""
+        v = str(val).strip()
+        try:
+            if v.startswith('1900-01-'):
+                d_str, t_str = v.split(' ')
+                days = int(d_str.split('-')[2])
+                h, m, s = map(float, t_str.split(':'))
+                return f"{days * 24 + int(h):02d}:{int(m):02d}:{int(s):02d}"
+            elif 'day' in v:
+                parts = v.split(' ')
+                days = int(parts[0])
+                h, m, s = map(float, parts[-1].split(':'))
+                return f"{days * 24 + int(h):02d}:{int(m):02d}:{int(s):02d}"
+        except:
+            pass
+        return v
+
     for col in pct_cols:
         display_df[col] = display_df[col].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) and x != '' else "")
     for col in numeric_cols:
@@ -250,7 +277,10 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
 
     for col in df.columns:
         if col not in pct_cols and col not in numeric_cols and col != 'ФИО':
-            display_df[col] = display_df[col].fillna('').astype(str)
+            if col in ['Рабочее время', 'Время перерывов']:
+                display_df[col] = display_df[col].apply(fix_time_format)
+            else:
+                display_df[col] = display_df[col].fillna('').astype(str)
 
     fig, ax = plt.subplots(figsize=(24, len(df) * 0.4 + 1))
     ax.axis('off')
