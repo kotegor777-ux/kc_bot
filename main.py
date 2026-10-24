@@ -27,6 +27,7 @@ main_kb = ReplyKeyboardMarkup(
 class ReportFSM(StatesGroup):
     waiting_for_report_type = State()
     waiting_for_file = State()
+    waiting_for_group_number = State()
     waiting_for_staff_numbers = State()
     waiting_for_gp_average = State()
     waiting_for_tags_file = State()
@@ -97,6 +98,19 @@ async def handle_file(message: Message, state: FSMContext):
         await process_comparative_report(message, df, "неделя" in report_type)
         await state.clear()
     else:
+        await message.answer("Введите номер вашей группы (например: 47):")
+        await state.set_state(ReportFSM.waiting_for_group_number)
+
+@dp.message(ReportFSM.waiting_for_group_number)
+async def handle_group_number(message: Message, state: FSMContext):
+    session = user_sessions.get(message.from_user.id, {})
+    session["target_group"] = message.text.strip()
+    report_type = session.get("type")
+    
+    if report_type == "Анализ группы":
+        await message.answer("Введите среднее (Конва) по ГП (например: 4.92):")
+        await state.set_state(ReportFSM.waiting_for_gp_average)
+    else:
         await message.answer("Введите Штат и Кол-во человек (или смен) через пробел (например: 24 16):")
         await state.set_state(ReportFSM.waiting_for_staff_numbers)
 
@@ -117,13 +131,14 @@ async def handle_gp_average(message: Message, state: FSMContext):
     session = user_sessions.get(message.from_user.id, {})
     gp_avg_text = message.text.strip().replace(',', '.')
     report_type = session.get("type")
+    target_group = session.get("target_group", "47")
     
     try: gp_avg_val = float(gp_avg_text)
     except ValueError: gp_avg_val = 0.0
 
     df_all = session.get("df")
-    shtat = session.get("shtat")
-    smena = session.get("smena")
+    shtat = session.get("shtat", 1)
+    smena = session.get("smena", 1)
     
     df_all.columns = [str(c).strip() for c in df_all.columns]
     rename_dict = {}
@@ -131,9 +146,6 @@ async def handle_gp_average(message: Message, state: FSMContext):
         if 'период' in col.lower() or 'зп' in col.lower(): rename_dict[col] = 'ЗП'
         elif 'последнее' in col.lower(): rename_dict[col] = 'Последнее действие'
     df_all.rename(columns=rename_dict, inplace=True)
-            
-    group_series = df_all['Ответственный'].astype(str).str.extract(r'(\d{2})')[0]
-    target_group = group_series.mode()[0] if not group_series.mode().empty else '47'
             
     df_target_full = df_all[df_all['Ответственный'].astype(str).str.contains(target_group, na=False)].copy()
     
