@@ -31,10 +31,12 @@ user_sessions = {}
 
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
+    await state.clear()
     await message.answer("Выберите тип отчета:", reply_markup=main_kb)
     await state.set_state(ReportFSM.waiting_for_report_type)
 
-@dp.message(ReportFSM.waiting_for_report_type, F.text.in_(["Отчет в группу 2ч", "Сравнительный по ГП", "Отчет в группу неделя", "Сравнительный по ГП неделя"]))
+# Убрали привязку к состоянию: теперь кнопки работают ВСЕГДА
+@dp.message(F.text.in_(["Отчет в группу 2ч", "Сравнительный по ГП", "Отчет в группу неделя", "Сравнительный по ГП неделя"]))
 async def choose_report_type(message: Message, state: FSMContext):
     user_sessions[message.from_user.id] = {"type": message.text}
     await message.answer(f"Жду файл Excel для: {message.text}")
@@ -90,7 +92,6 @@ async def handle_gp_average(message: Message, state: FSMContext):
         elif 'последнее' in col.lower():
             df_all.rename(columns={col: 'Последнее действие'}, inplace=True)
             
-    # Автоматическое определение номера группы
     group_series = df_all['Ответственный'].astype(str).str.extract(r'(\d{2})')[0]
     target_group = group_series.mode()[0] if not group_series.mode().empty else '47'
             
@@ -286,7 +287,8 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
             else:
                 display_df[col] = display_df[col].fillna('').astype(str)
 
-    fig, ax = plt.subplots(figsize=(24, len(df) * 0.4 + 1))
+    # Увеличен размер холста
+    fig, ax = plt.subplots(figsize=(26, len(df) * 0.5 + 1.5))
     ax.axis('off')
 
     cols_count = len(display_df.columns)
@@ -294,8 +296,10 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
 
     table = ax.table(cellText=display_df.values, colLabels=display_df.columns, loc='center', cellLoc='center', colWidths=col_widths)
     table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1.2, 1.6)
+    
+    # Увеличен шрифт и высота ячеек
+    table.set_fontsize(12)
+    table.scale(1.2, 2.2)
 
     rwg_cmap = mcolors.LinearSegmentedColormap.from_list("rwg", ["#f4cccc", "#ffffff", "#77c38d"])
     
@@ -345,7 +349,8 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
                 table[(j, i)].get_text().set_horizontalalignment('left')
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
+    # Разрешение поднято до 250 dpi
+    plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=250)
     buf.seek(0)
     plt.close()
     return buf
@@ -484,7 +489,8 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     
     final_df = pd.concat([pd.DataFrame([itogo_row]), final_df], ignore_index=True)
 
-    fig, ax = plt.subplots(figsize=(24, len(final_df) * 0.4 + 1)) 
+    # Увеличен размер холста
+    fig, ax = plt.subplots(figsize=(24, len(final_df) * 0.5 + 1.5)) 
     ax.axis('off')
     
     cols_count = len(final_df.columns)
@@ -492,8 +498,10 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     
     table = ax.table(cellText=final_df.values, colLabels=final_df.columns, loc='center', cellLoc='center', colWidths=col_widths)
     table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1.2, 1.8)
+    
+    # Увеличен шрифт и высота ячеек
+    table.set_fontsize(12)
+    table.scale(1.2, 2.2)
     
     rwg_cmap = mcolors.LinearSegmentedColormap.from_list("rwg", ["#f4cccc", "#ffffff", "#77c38d"])
     
@@ -532,7 +540,8 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
             table[(j, i)].set_facecolor(bg_color)
     
     buf = io.BytesIO()
-    plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
+    # Разрешение поднято до 250 dpi
+    plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=250)
     buf.seek(0)
     plt.close()
     
