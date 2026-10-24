@@ -83,9 +83,6 @@ async def handle_gp_average(message: Message, state: FSMContext):
     shtat = session.get("shtat")
     smena = session.get("smena")
     
-    text_report = generate_group_text(df_all, shtat, smena, gp_avg_text)
-    await message.answer(text_report, parse_mode="HTML")
-    
     # Очистка и жесткий поиск нужных колонок по части слова
     df_all.columns = [str(c).strip() for c in df_all.columns]
     for col in df_all.columns:
@@ -94,7 +91,26 @@ async def handle_gp_average(message: Message, state: FSMContext):
         elif 'последнее' in col.lower():
             df_all.rename(columns={col: 'Последнее действие'}, inplace=True)
             
-    df_47 = df_all[df_all['Ответственный'].astype(str).str.contains('47', na=False)].copy()
+    df_47_full = df_all[df_all['Ответственный'].astype(str).str.contains('47', na=False)].copy()
+    
+    # Правильный расчет конверсии SUM(X) / SUM(AY)
+    try:
+        sum_x = pd.to_numeric(df_47_full.iloc[:, 23], errors='coerce').sum()
+        sum_ay = pd.to_numeric(df_47_full.iloc[:, 50], errors='coerce').sum()
+        real_avg_usp = (sum_x / sum_ay * 100) if sum_ay > 0 else None
+    except Exception:
+        real_avg_usp = None
+        
+    # Правильный расчет дозвона (SUM(AE) - SUM(Y)) / SUM(AE)
+    try:
+        sum_y = pd.to_numeric(df_47_full.iloc[:, 24], errors='coerce').sum()
+        sum_ae = pd.to_numeric(df_47_full.iloc[:, 30], errors='coerce').sum()
+        real_avg_dozvon = ((sum_ae - sum_y) / sum_ae * 100) if sum_ae > 0 else None
+    except Exception:
+        real_avg_dozvon = None
+        
+    text_report = generate_group_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon)
+    await message.answer(text_report, parse_mode="HTML")
     
     columns_to_keep = ['ФИО', 'Рабочее время', 'Время перерывов', '% у рабочего места', 
                        '% дозвона до человека', '% успешных по дозвону', 'Успешные', 'Всего']
@@ -104,40 +120,32 @@ async def handle_gp_average(message: Message, state: FSMContext):
     if 'Последнее действие' in df_all.columns:
         columns_to_keep.append('Последнее действие')
                        
-    existing_cols = [c for c in columns_to_keep if c in df_47.columns]
-    df_47 = df_47[existing_cols]
+    existing_cols = [c for c in columns_to_keep if c in df_47_full.columns]
+    df_47 = df_47_full[existing_cols]
         
-    image_bytes = render_dataframe_to_image(df_47, gp_avg_val)
+    image_bytes = render_dataframe_to_image(df_47, gp_avg_val, real_avg_usp, real_avg_dozvon)
     await message.answer_photo(photo=BufferedInputFile(image_bytes.read(), filename="report.jpg"), caption="Срез по группе")
     await state.set_state(ReportFSM.waiting_for_report_type)
 
-def time_to_seconds(t_str):
-    try:
-        parts = str(t_str).split(':')
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-    except:
-        pass
-    return 0
-
-def format_seconds_to_time(seconds):
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    return f"{h}:{m:02d}:{s:02d}"
-
-def generate_group_text(df_all, shtat, smena, gp_avg):
+def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_avg_dozvon=None):
     df = df_all[df_all['Ответственный'].astype(str).str.contains('47', na=False)].copy()
     if df.empty:
         return "Нет данных по 47 группе."
 
     def clean_pct(col):
-        # Перевод долей из Excel в проценты (*100)
         res = pd.to_numeric(df[col].astype(str).str.replace('%', '').str.replace(',', '.'), errors='coerce')
         return res * 100 if res.mean() < 1.5 else res
 
-    avg_usp_dozvon = clean_pct('% успешных по дозвону').mean()
-    avg_dozvon = clean_pct('% дозвона до человека').mean()
+    if real_avg_usp is not None:
+        avg_usp_dozvon = real_avg_usp
+    else:
+        avg_usp_dozvon = clean_pct('% успешных по дозвону').mean()
+        
+    if real_avg_dozvon is not None:
+        avg_dozvon = real_avg_dozvon
+    else:
+        avg_dozvon = clean_pct('% дозвона до человека').mean()
+        
     avg_rab_mesto = clean_pct('% у рабочего места').mean()
     avg_usp = pd.to_numeric(df['Успешные'], errors='coerce').mean()
     avg_vsego = pd.to_numeric(df['Всего'], errors='coerce').mean()
@@ -145,7 +153,30 @@ def generate_group_text(df_all, shtat, smena, gp_avg):
     fact_vyhod_count = pd.to_numeric(df['Смен'], errors='coerce').sum()
     plan_vyhod = (smena / shtat) * 100 if shtat > 0 else 0
     fact_vyhod = (fact_vyhod_count / shtat) * 100 if shtat > 0 else 0
+    
     over_100_calls = len(df[pd.to_numeric(df['Всего'], errors='coerce') >= 100])
+    
+    # Расчет числителя КПП из столбца AX (индекс 49)
+    try:
+        ax_col = pd.to_numeric(df.iloc[:, 49], errors='coerce')
+        kpp_count = len(df[(ax_col > 0) & (ax_col <= 80)])
+    except Exception:
+        kpp_count = 0
+
+    def time_to_seconds(t_str):
+        try:
+            parts = str(t_str).split(':')
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        except:
+            pass
+        return 0
+
+    def format_seconds_to_time(seconds):
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        return f"{h}:{m:02d}:{s:02d}"
 
     total_seconds = df['Рабочее время'].apply(time_to_seconds).sum()
     avg_seconds = total_seconds / fact_vyhod_count if fact_vyhod_count > 0 else 0
@@ -160,14 +191,14 @@ def generate_group_text(df_all, shtat, smena, gp_avg):
 Заявок на оператора: <b>{avg_vsego:.2f}</b>
 % выход план : <b>{plan_vyhod:.0f}%</b>
 % выход факт: <b>{fact_vyhod:.0f}%</b>
-КПП-{over_100_calls}/{int(fact_vyhod_count)}
+КПП - <b>{kpp_count}/{int(fact_vyhod_count)}</b>
 От 100 ЗВ - <b>{over_100_calls}/{int(fact_vyhod_count)}</b>
 Продуктивные часы: <b>{prod_hours_str}</b>
 
 Конва по ГП: <b>{gp_avg}</b>
 """
 
-def render_dataframe_to_image(df_original, gp_avg=0.0):
+def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_avg_dozvon=None):
     df = df_original.copy()
     
     pct_cols = [c for c in ['% у рабочего места', '% дозвона до человека', '% успешных по дозвону'] if c in df.columns]
@@ -184,6 +215,12 @@ def render_dataframe_to_image(df_original, gp_avg=0.0):
     avg_row['ФИО'] = 'СРЕДНЕЕ'
     for col in pct_cols + numeric_cols:
         avg_row[col] = df[col].mean()
+        
+    if real_avg_usp is not None and '% успешных по дозвону' in avg_row:
+        avg_row['% успешных по дозвону'] = real_avg_usp
+        
+    if real_avg_dozvon is not None and '% дозвона до человека' in avg_row:
+        avg_row['% дозвона до человека'] = real_avg_dozvon
     
     df = pd.concat([df, pd.DataFrame([avg_row])], ignore_index=True)
     
@@ -211,7 +248,6 @@ def render_dataframe_to_image(df_original, gp_avg=0.0):
     table.set_fontsize(9)
     table.scale(1.2, 1.6)
 
-    # Обновленная палитра градиента из ваших скриншотов
     rwg_cmap = mcolors.LinearSegmentedColormap.from_list("rwg", ["#f4cccc", "#ffffff", "#77c38d"])
     
     norm_dict = {}
@@ -234,14 +270,13 @@ def render_dataframe_to_image(df_original, gp_avg=0.0):
             if pd.notnull(val) and val != '':
                 v = pd.to_numeric(val, errors='coerce')
                 if pd.notnull(v):
-                    # Точные пороги по вашей палитре
                     if col == usp_col and gp_avg > 0:
                         t1, t2, t3, t4 = gp_avg * 0.70, gp_avg * 0.85, gp_avg * 1.15, gp_avg * 1.30
-                        if v < t1: bg_color = "#f4cccc"      # Розовый
-                        elif v < t2: bg_color = "#fce5cd"    # Оранжевый
-                        elif v < t3: bg_color = "#fff2cc"    # Желтый
-                        elif v < t4: bg_color = "#b7e1cd"    # Светло-зеленый
-                        else: bg_color = "#77c38d"           # Темно-зеленый
+                        if v < t1: bg_color = "#f4cccc"
+                        elif v < t2: bg_color = "#fce5cd"
+                        elif v < t3: bg_color = "#fff2cc"
+                        elif v < t4: bg_color = "#b7e1cd"
+                        else: bg_color = "#77c38d"
                     
                     elif col in ['ФИО', 'Рабочее время', 'Время перерывов'] and not is_avg_row:
                         row_usp = pd.to_numeric(df.iloc[j][usp_col], errors='coerce')
@@ -265,8 +300,8 @@ def render_dataframe_to_image(df_original, gp_avg=0.0):
     buf.seek(0)
     plt.close()
     return buf
+
 async def process_comparative_report(message: Message, df: pd.DataFrame, is_weekly: bool):
-    # Логика сравнительного отчета остается без изменений
     df['Номер_Группы'] = df['Ответственный'].astype(str).str.extract(r'(\d{2})')
     grouped = df.groupby('Номер_Группы').agg(
         БАЗА=('Смен' if is_weekly else 'ФИО', 'sum' if is_weekly else 'count'), 
