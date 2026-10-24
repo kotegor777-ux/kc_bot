@@ -160,6 +160,10 @@ def render_dataframe_to_image(df_original):
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
+    # Сортировка по убыванию
+    if '% успешных по дозвону' in df.columns:
+        df = df.sort_values(by='% успешных по дозвону', ascending=False).reset_index(drop=True)
+
     # Расчет строки СРЕДНЕЕ
     avg_row = {col: '' for col in df.columns}
     avg_row['ФИО'] = 'СРЕДНЕЕ'
@@ -175,10 +179,15 @@ def render_dataframe_to_image(df_original):
     for col in numeric_cols:
         display_df[col] = display_df[col].apply(lambda x: f"{x:.0f}" if pd.notnull(x) and x != '' else "")
 
-    fig, ax = plt.subplots(figsize=(15, len(df) * 0.4 + 1))
+    # Увеличенная ширина всей картинки
+    fig, ax = plt.subplots(figsize=(18, len(df) * 0.4 + 1))
     ax.axis('off')
 
-    table = ax.table(cellText=display_df.values, colLabels=display_df.columns, loc='center', cellLoc='center')
+    # Жестко задаем ширину колонок (ФИО = 28% ширины, остальные делят остаток)
+    cols_count = len(display_df.columns)
+    col_widths = [0.28] + [0.72 / (cols_count - 1)] * (cols_count - 1)
+
+    table = ax.table(cellText=display_df.values, colLabels=display_df.columns, loc='center', cellLoc='center', colWidths=col_widths)
     table.auto_set_font_size(False)
     table.set_fontsize(9)
     table.scale(1.2, 1.6)
@@ -198,8 +207,13 @@ def render_dataframe_to_image(df_original):
         # Шапка
         table[(0, i)].set_facecolor("#4C566A")
         table[(0, i)].get_text().set_color("white")
-        # Строка СРЕДНЕЕ (Фиолетовая)
+        # Строка СРЕДНЕЕ
         table[(len(df), i)].set_facecolor("#D8BFD8")
+        
+        # Выравнивание длинного ФИО по левому краю
+        if col == 'ФИО':
+            for j in range(len(df) + 1):
+                table[(j, i)].get_text().set_horizontalalignment('left')
 
     buf = io.BytesIO()
     plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
