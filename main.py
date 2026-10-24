@@ -92,22 +92,33 @@ async def handle_gp_average(message: Message, state: FSMContext):
             
     df_47_full = df_all[df_all['Ответственный'].astype(str).str.contains('47', na=False)].copy()
     
-    # Безопасное извлечение и очистка суммы с удалением пробелов и %
-    def safe_sum(df, col_idx):
-        if col_idx >= df.shape[1]: return 0
-        s = df.iloc[:, col_idx].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
+    def safe_sum_name(df, substr):
+        col = next((c for c in df.columns if substr.lower() in str(c).lower()), None)
+        if not col: return 0
+        s = df[col].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
         return pd.to_numeric(s, errors='coerce').sum()
 
+    def safe_sum_idx(df, idx):
+        if idx >= df.shape[1]: return 0
+        s = df.iloc[:, idx].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
+        return pd.to_numeric(s, errors='coerce').sum()
+
+    # Точный расчет конверсии: Успешные / (Всего - Недозвон - Некорректные)
     try:
-        sum_x = safe_sum(df_47_full, 23)
-        sum_ay = safe_sum(df_47_full, 50)
-        real_avg_usp = (sum_x / sum_ay * 100) if sum_ay > 0 else None
+        sum_usp = safe_sum_name(df_47_full, 'успешные')
+        sum_vsego = safe_sum_name(df_47_full, 'всего')
+        sum_nedozvon = safe_sum_name(df_47_full, 'недозвон')
+        sum_nekor = safe_sum_name(df_47_full, 'некор') 
+        
+        sum_prinyatye = sum_vsego - sum_nedozvon - sum_nekor
+        real_avg_usp = (sum_usp / sum_prinyatye * 100) if sum_prinyatye > 0 else None
     except Exception:
         real_avg_usp = None
         
+    # Расчет дозвона (индексы Y=24 и AE=30)
     try:
-        sum_y = safe_sum(df_47_full, 24)
-        sum_ae = safe_sum(df_47_full, 30)
+        sum_y = safe_sum_idx(df_47_full, 24)
+        sum_ae = safe_sum_idx(df_47_full, 30)
         real_avg_dozvon = ((sum_ae - sum_y) / sum_ae * 100) if sum_ae > 0 else None
     except Exception:
         real_avg_dozvon = None
