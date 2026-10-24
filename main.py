@@ -98,12 +98,7 @@ async def handle_gp_average(message: Message, state: FSMContext):
         s = df[col].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
         return pd.to_numeric(s, errors='coerce').sum()
 
-    def safe_sum_idx(df, idx):
-        if idx >= df.shape[1]: return 0
-        s = df.iloc[:, idx].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
-        return pd.to_numeric(s, errors='coerce').sum()
-
-    # Точный расчет конверсии: Успешные / (Всего - Недозвон - Некорректные)
+    # Точный расчет конверсии: (Успешные / (Всего - Недозвон - Некорректные)) * 100
     try:
         sum_usp = safe_sum_name(df_47_full, 'успешные')
         sum_vsego = safe_sum_name(df_47_full, 'всего')
@@ -115,11 +110,11 @@ async def handle_gp_average(message: Message, state: FSMContext):
     except Exception:
         real_avg_usp = None
         
-    # Расчет дозвона (индексы Y=24 и AE=30)
+    # Точный расчет дозвона: ((Всего - Недозвоны) / Всего) * 100
     try:
-        sum_y = safe_sum_idx(df_47_full, 24)
-        sum_ae = safe_sum_idx(df_47_full, 30)
-        real_avg_dozvon = ((sum_ae - sum_y) / sum_ae * 100) if sum_ae > 0 else None
+        sum_vsego = safe_sum_name(df_47_full, 'всего')
+        sum_nedozvon = safe_sum_name(df_47_full, 'недозвон')
+        real_avg_dozvon = ((sum_vsego - sum_nedozvon) / sum_vsego * 100) if sum_vsego > 0 else None
     except Exception:
         real_avg_dozvon = None
         
@@ -160,25 +155,22 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
     else:
         avg_dozvon = clean_pct('% дозвона до человека').mean()
         
-    avg_rab_mesto = clean_pct('% у рабочего места').mean()
+    avg_rab_mesto_series = clean_pct('% у рабочего места')
+    avg_rab_mesto = avg_rab_mesto_series.mean()
+    
     avg_usp = pd.to_numeric(df['Успешные'], errors='coerce').mean()
-    avg_vsego = pd.to_numeric(df['Всего'], errors='coerce').mean()
+    vsego_series = pd.to_numeric(df['Всего'], errors='coerce')
+    avg_vsego = vsego_series.mean()
     
     fact_vyhod_count = pd.to_numeric(df['Смен'], errors='coerce').sum()
     plan_vyhod = (smena / shtat) * 100 if shtat > 0 else 0
     fact_vyhod = (fact_vyhod_count / shtat) * 100 if shtat > 0 else 0
     
-    over_100_calls = len(df[pd.to_numeric(df['Всего'], errors='coerce') >= 100])
+    # От 100 звонков (где 'Всего' >= 100)
+    over_100_calls = len(df[vsego_series >= 100])
     
-    try:
-        if 49 < df.shape[1]:
-            ax_col = df.iloc[:, 49].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
-            ax_num = pd.to_numeric(ax_col, errors='coerce')
-            kpp_count = len(ax_num[(ax_num > 0) & (ax_num <= 80)])
-        else:
-            kpp_count = 0
-    except Exception:
-        kpp_count = 0
+    # Расчет КПП (где '% у рабочего места' > 0 и <= 80)
+    kpp_count = len(df[(avg_rab_mesto_series > 0) & (avg_rab_mesto_series <= 80)])
 
     def time_to_seconds(t_str):
         try:
