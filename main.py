@@ -86,21 +86,27 @@ async def handle_gp_average(message: Message, state: FSMContext):
     text_report = generate_group_text(df_all, shtat, smena, gp_avg_text)
     await message.answer(text_report, parse_mode="HTML")
     
-    # Переименовываем колонку для краткости, если она называется "За период"
-    if 'За период' in df_all.columns:
-        df_all = df_all.rename(columns={'За период': 'ЗП'})
-        
+    # Очистка и жесткий поиск нужных колонок по части слова
+    df_all.columns = [str(c).strip() for c in df_all.columns]
+    for col in df_all.columns:
+        if 'период' in col.lower() or 'зп' in col.lower():
+            df_all.rename(columns={col: 'ЗП'}, inplace=True)
+        elif 'последнее' in col.lower():
+            df_all.rename(columns={col: 'Последнее действие'}, inplace=True)
+            
     df_47 = df_all[df_all['Ответственный'].astype(str).str.contains('47', na=False)].copy()
     
-    # Добавлены новые колонки ЗП и Последнее время действия
     columns_to_keep = ['ФИО', 'Рабочее время', 'Время перерывов', '% у рабочего места', 
-                       '% дозвона до человека', '% успешных по дозвону', 'Успешные', 'Всего', 
-                       'ЗП', 'Последнее время действия']
+                       '% дозвона до человека', '% успешных по дозвону', 'Успешные', 'Всего']
+    
+    if 'ЗП' in df_all.columns:
+        columns_to_keep.append('ЗП')
+    if 'Последнее действие' in df_all.columns:
+        columns_to_keep.append('Последнее действие')
                        
     existing_cols = [c for c in columns_to_keep if c in df_47.columns]
     df_47 = df_47[existing_cols]
         
-    # Передаем gp_avg_val для расчета 4 порогов окрашивания
     image_bytes = render_dataframe_to_image(df_47, gp_avg_val)
     await message.answer_photo(photo=BufferedInputFile(image_bytes.read(), filename="report.jpg"), caption="Срез по группе")
     await state.set_state(ReportFSM.waiting_for_report_type)
@@ -174,15 +180,15 @@ def render_dataframe_to_image(df_original, gp_avg=0.0):
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    if '% успешных по дозвону' in df.columns:
-        df = df.sort_values(by='% успешных по дозвону', ascending=False).reset_index(drop=True)
-
     avg_row = {col: '' for col in df.columns}
     avg_row['ФИО'] = 'СРЕДНЕЕ'
     for col in pct_cols + numeric_cols:
         avg_row[col] = df[col].mean()
     
     df = pd.concat([df, pd.DataFrame([avg_row])], ignore_index=True)
+    
+    if '% успешных по дозвону' in df.columns:
+        df = df.sort_values(by='% успешных по дозвону', ascending=False).reset_index(drop=True)
     
     display_df = df.copy()
     for col in pct_cols:
@@ -194,7 +200,6 @@ def render_dataframe_to_image(df_original, gp_avg=0.0):
         if col not in pct_cols and col not in numeric_cols and col != 'ФИО':
             display_df[col] = display_df[col].fillna('').astype(str)
 
-    # Увеличена ширина холста, чтобы вместить все колонки
     fig, ax = plt.subplots(figsize=(24, len(df) * 0.4 + 1))
     ax.axis('off')
 
@@ -207,29 +212,34 @@ def render_dataframe_to_image(df_original, gp_avg=0.0):
     table.scale(1.2, 1.6)
 
     cmap = plt.get_cmap('RdYlGn')
+    
+    norm_dict = {}
+    for col in pct_cols + numeric_cols:
+        vals = pd.to_numeric(df[df['ФИО'] != 'СРЕДНЕЕ'][col], errors='coerce').dropna()
+        if not vals.empty:
+            norm_dict[col] = mcolors.Normalize(vmin=vals.min(), vmax=vals.max())
+
     for i, col in enumerate(df.columns):
-        if col in pct_cols + numeric_cols:
-            vals = pd.to_numeric(df[col].iloc[:-1], errors='coerce').dropna()
-            if not vals.empty:
-                norm = mcolors.Normalize(vmin=vals.min(), vmax=vals.max())
-                for j in range(len(df) - 1):
-                    val = df.iloc[j][col]
-                    if pd.notnull(val) and val != '':
-                        # Применение 4 порогов (5 цветов) исключительно для успешных по дозвону
-                        if col == '% успешных по дозвону' and gp_avg > 0:
-                            t1, t2, t3, t4 = gp_avg * 0.70, gp_avg * 0.85, gp_avg * 1.15, gp_avg * 1.30
-                            if val < t1: bg_color = "#e06666"      # Красный
-                            elif val < t2: bg_color = "#f6b26b"    # Оранжевый
-                            elif val < t3: bg_color = "#ffd966"    # Желтый
-                            elif val < t4: bg_color = "#93c47d"    # Светло-зеленый
-                            else: bg_color = "#6aa84f"             # Темно-зеленый
-                            table[(j+1, i)].set_facecolor(bg_color)
-                        else:
-                            table[(j+1, i)].set_facecolor(cmap(norm(float(val))))
+        for j in range(len(df)):
+            is_avg_row = (df.iloc[j]['ФИО'] == 'СРЕДНЕЕ')
+            val = df.iloc[j][col]
+            
+            if is_avg_row:
+                table[(j+1, i)].set_facecolor("#D8BFD8")
+            elif col in pct_cols + numeric_cols and pd.notnull(val) and val != '':
+                if col == '% успешных по дозвону' and gp_avg > 0:
+                    t1, t2, t3, t4 = gp_avg * 0.70, gp_avg * 0.85, gp_avg * 1.15, gp_avg * 1.30
+                    if val < t1: bg_color = "#f4cccc"      # Мягкий розовый
+                    elif val < t2: bg_color = "#f6b26b"    # Оранжевый
+                    elif val < t3: bg_color = "#ffd966"    # Желтый
+                    elif val < t4: bg_color = "#93c47d"    # Светло-зеленый
+                    else: bg_color = "#6aa84f"             # Темно-зеленый
+                    table[(j+1, i)].set_facecolor(bg_color)
+                elif col in norm_dict:
+                    table[(j+1, i)].set_facecolor(cmap(norm_dict[col](float(val))))
         
         table[(0, i)].set_facecolor("#4C566A")
         table[(0, i)].get_text().set_color("white")
-        table[(len(df), i)].set_facecolor("#D8BFD8")
         
         if col == 'ФИО':
             for j in range(len(df) + 1):
