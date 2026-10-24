@@ -35,7 +35,6 @@ async def start_cmd(message: Message, state: FSMContext):
     await message.answer("Выберите тип отчета:", reply_markup=main_kb)
     await state.set_state(ReportFSM.waiting_for_report_type)
 
-# Убрали привязку к состоянию: теперь кнопки работают ВСЕГДА
 @dp.message(F.text.in_(["Отчет в группу 2ч", "Сравнительный по ГП", "Отчет в группу неделя", "Сравнительный по ГП неделя"]))
 async def choose_report_type(message: Message, state: FSMContext):
     user_sessions[message.from_user.id] = {"type": message.text}
@@ -86,11 +85,13 @@ async def handle_gp_average(message: Message, state: FSMContext):
     smena = session.get("smena")
     
     df_all.columns = [str(c).strip() for c in df_all.columns]
+    rename_dict = {}
     for col in df_all.columns:
         if 'период' in col.lower() or 'зп' in col.lower():
-            df_all.rename(columns={col: 'ЗП'}, inplace=True)
+            rename_dict[col] = 'ЗП'
         elif 'последнее' in col.lower():
-            df_all.rename(columns={col: 'Последнее действие'}, inplace=True)
+            rename_dict[col] = 'Последнее действие'
+    df_all.rename(columns=rename_dict, inplace=True)
             
     group_series = df_all['Ответственный'].astype(str).str.extract(r'(\d{2})')[0]
     target_group = group_series.mode()[0] if not group_series.mode().empty else '47'
@@ -275,6 +276,14 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
             pass
         return v
 
+    def safe_str(val):
+        if pd.isnull(val): return ""
+        v = str(val).strip()
+        if v in ['NaT', 'nan', 'None', '']: return ""
+        if '1900-01-01' in v:
+            v = v.replace('1900-01-01', '').strip()
+        return v
+
     for col in pct_cols:
         display_df[col] = display_df[col].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) and x != '' else "")
     for col in numeric_cols:
@@ -285,9 +294,8 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
             if col in ['Рабочее время', 'Время перерывов']:
                 display_df[col] = display_df[col].apply(fix_time_format)
             else:
-                display_df[col] = display_df[col].fillna('').astype(str)
+                display_df[col] = display_df[col].apply(safe_str)
 
-    # Увеличен размер холста
     fig, ax = plt.subplots(figsize=(26, len(df) * 0.5 + 1.5))
     ax.axis('off')
 
@@ -296,8 +304,6 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
 
     table = ax.table(cellText=display_df.values, colLabels=display_df.columns, loc='center', cellLoc='center', colWidths=col_widths)
     table.auto_set_font_size(False)
-    
-    # Увеличен шрифт и высота ячеек
     table.set_fontsize(12)
     table.scale(1.2, 2.2)
 
@@ -312,6 +318,9 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
     usp_col = '% успешных по дозвону'
 
     for i, col in enumerate(df.columns):
+        # Ограничение размера шрифта для шапки, чтобы все влезало
+        table[(0, i)].get_text().set_fontsize(10)
+        
         for j in range(len(df)):
             is_avg_row = (df.iloc[j]['ФИО'] == 'СРЕДНЕЕ')
             val = df.iloc[j][col]
@@ -349,7 +358,6 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
                 table[(j, i)].get_text().set_horizontalalignment('left')
 
     buf = io.BytesIO()
-    # Разрешение поднято до 250 dpi
     plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=250)
     buf.seek(0)
     plt.close()
@@ -357,12 +365,14 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
 
 async def process_comparative_report(message: Message, df: pd.DataFrame, is_weekly: bool):
     df.columns = [str(c).strip() for c in df.columns]
+    rename_dict = {}
     for col in df.columns:
         if 'период' in col.lower() or 'зп' in col.lower():
-            df.rename(columns={col: 'ЗП'}, inplace=True)
+            rename_dict[col] = 'ЗП'
+    df.rename(columns=rename_dict, inplace=True)
             
-    df['Група'] = df['Ответственный'].astype(str).str.extract(r'(\d{2})')
-    df = df.dropna(subset=['Група'])
+    df['Группа'] = df['Ответственный'].astype(str).str.extract(r'(\d{2})')
+    df = df.dropna(subset=['Группа'])
 
     def time_to_seconds(t_str):
         if pd.isnull(t_str): return 0
@@ -413,7 +423,7 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     if df['У_раб_места_num'].mean() < 1.5:
         df['У_раб_места_num'] *= 100
 
-    grouped = df.groupby('Група').agg(
+    grouped = df.groupby('Группа').agg(
         Смен=('Смен_num', 'sum'),
         ОБРАБОТАНО=('Всего_num', 'sum'),
         УСПЕШНЫЕ=('Успешные_num', 'sum'),
@@ -426,32 +436,33 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     ).reset_index()
     
     if grouped['Смен'].sum() == 0:
-        smen_counts = df.groupby('Група').size()
-        grouped['Смен'] = grouped['Група'].map(smen_counts)
+        smen_counts = df.groupby('Группа').size()
+        grouped['Смен'] = grouped['Группа'].map(smen_counts)
 
     grouped['CR%'] = (grouped['УСПЕШНЫЕ'] / (grouped['ОБРАБОТАНО'] - grouped['Недозвон'] - grouped['Некор']).replace(0, 1)) * 100
     grouped['ЗАЯВОК НА ОП'] = grouped['ОБРАБОТАНО'] / grouped['Смен'].replace(0, 1)
     grouped['УСПЕШЕК НА ОП'] = grouped['УСПЕШНЫЕ'] / grouped['Смен'].replace(0, 1)
     grouped['Продуктивное_сек_оп'] = grouped['Рабочее_сек'] / grouped['Смен'].replace(0, 1)
     grouped['Перерыв_сек_оп'] = grouped['Перерыв_сек'] / grouped['Смен'].replace(0, 1)
-    grouped['% ДОЗВОНА ДО ЧЕЛОВЕКА'] = ((grouped['ОБРАБОТАНО'] - grouped['Недозвон']) / grouped['ОБРАБОТАНО'].replace(0, 1)) * 100
+    grouped['% ДОЗВОНА'] = ((grouped['ОБРАБОТАНО'] - grouped['Недозвон']) / grouped['ОБРАБОТАНО'].replace(0, 1)) * 100
     grouped['ОПЛАТА'] = grouped['ЗП']
     grouped['ОПЛАТА НА ОП'] = grouped['ОПЛАТА'] / grouped['Смен'].replace(0, 1)
 
+    # Сокращенные названия колонок с переносом строк для компакности
     final_df = pd.DataFrame()
-    final_df['Група'] = grouped['Група']
+    final_df['Группа'] = grouped['Группа']
     final_df['CR%'] = grouped['CR%'].apply(lambda x: f"{x:.2f}%")
     final_df['Смен'] = grouped['Смен'].astype(int)
-    final_df['ОБРАБОТАНО'] = grouped['ОБРАБОТАНО'].astype(int)
-    final_df['ЗАЯВОК НА ОП'] = grouped['ЗАЯВОК НА ОП'].apply(lambda x: f"{x:.2f}")
-    final_df['УСПЕШНЫЕ'] = grouped['УСПЕШНЫЕ'].astype(int)
-    final_df['УСПЕШЕК НА ОП'] = grouped['УСПЕШЕК НА ОП'].apply(lambda x: f"{x:.2f}")
-    final_df['ПРОДУКТИВНОЕ ВРЕМЯ НА ОП'] = grouped['Продуктивное_сек_оп'].apply(format_seconds_to_time)
-    final_df['ПЕРЕРЫВЫ НА ОП'] = grouped['Перерыв_сек_оп'].apply(format_seconds_to_time)
-    final_df['% У РАБОЧЕГО МЕСТА'] = grouped['У_раб_места'].apply(lambda x: f"{x:.2f}%")
-    final_df['% ДОЗВОНА ДО ЧЕЛОВЕКА'] = grouped['% ДОЗВОНА ДО ЧЕЛОВЕКА'].apply(lambda x: f"{x:.2f}%")
-    final_df['ОПЛАТА'] = grouped['ОПЛАТА'].apply(lambda x: f"{x:.2f}")
-    final_df['ОПЛАТА НА ОП'] = grouped['ОПЛАТА НА ОП'].apply(lambda x: f"{x:.2f}")
+    final_df['Обрабо\n-тано'] = grouped['ОБРАБОТАНО'].astype(int)
+    final_df['Заявок\nна ОП'] = grouped['ЗАЯВОК НА ОП'].apply(lambda x: f"{x:.2f}")
+    final_df['Успеш\n-ные'] = grouped['УСПЕШНЫЕ'].astype(int)
+    final_df['Успешек\nна ОП'] = grouped['УСПЕШЕК НА ОП'].apply(lambda x: f"{x:.2f}")
+    final_df['Прод. время\nна ОП'] = grouped['Продуктивное_сек_оп'].apply(format_seconds_to_time)
+    final_df['Перерывы\nна ОП'] = grouped['Перерыв_сек_оп'].apply(format_seconds_to_time)
+    final_df['% у раб.\nместа'] = grouped['У_раб_места'].apply(lambda x: f"{x:.2f}%")
+    final_df['% дозвона'] = grouped['% ДОЗВОНА'].apply(lambda x: f"{x:.2f}%")
+    final_df['Оплата'] = grouped['ОПЛАТА'].apply(lambda x: f"{x:.2f}")
+    final_df['Оплата\nна ОП'] = grouped['ОПЛАТА НА ОП'].apply(lambda x: f"{x:.2f}")
 
     total_smen = grouped['Смен'].sum()
     total_obrabotano = grouped['ОБРАБОТАНО'].sum()
@@ -472,24 +483,23 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     total_oplata_op = total_zp / total_smen if total_smen > 0 else 0
 
     itogo_row = {
-        'Група': 'ИТОГО',
+        'Группа': 'ИТОГО',
         'CR%': f"{total_cr:.2f}%",
         'Смен': int(total_smen),
-        'ОБРАБОТАНО': int(total_obrabotano),
-        'ЗАЯВОК НА ОП': f"{total_zayavok_op:.2f}",
-        'УСПЕШНЫЕ': int(total_uspeshnye),
-        'УСПЕШЕК НА ОП': f"{total_uspeshek_op:.2f}",
-        'ПРОДУКТИВНОЕ ВРЕМЯ НА ОП': format_seconds_to_time(total_prod_op),
-        'ПЕРЕРЫВЫ НА ОП': format_seconds_to_time(total_pereryv_op),
-        '% У РАБОЧЕГО МЕСТА': f"{total_rab_mesto:.2f}%",
-        '% ДОЗВОНА ДО ЧЕЛОВЕКА': f"{total_dozvon:.2f}%",
-        'ОПЛАТА': f"{total_zp:.2f}",
-        'ОПЛАТА НА ОП': f"{total_oplata_op:.2f}"
+        'Обрабо\n-тано': int(total_obrabotano),
+        'Заявок\nна ОП': f"{total_zayavok_op:.2f}",
+        'Успеш\n-ные': int(total_uspeshnye),
+        'Успешек\nна ОП': f"{total_uspeshek_op:.2f}",
+        'Прод. время\nна ОП': format_seconds_to_time(total_prod_op),
+        'Перерывы\nна ОП': format_seconds_to_time(total_pereryv_op),
+        '% у раб.\nместа': f"{total_rab_mesto:.2f}%",
+        '% дозвона': f"{total_dozvon:.2f}%",
+        'Оплата': f"{total_zp:.2f}",
+        'Оплата\nна ОП': f"{total_oplata_op:.2f}"
     }
     
     final_df = pd.concat([pd.DataFrame([itogo_row]), final_df], ignore_index=True)
 
-    # Увеличен размер холста
     fig, ax = plt.subplots(figsize=(24, len(final_df) * 0.5 + 1.5)) 
     ax.axis('off')
     
@@ -498,17 +508,15 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     
     table = ax.table(cellText=final_df.values, colLabels=final_df.columns, loc='center', cellLoc='center', colWidths=col_widths)
     table.auto_set_font_size(False)
-    
-    # Увеличен шрифт и высота ячеек
     table.set_fontsize(12)
-    table.scale(1.2, 2.2)
+    table.scale(1.2, 2.4)
     
     rwg_cmap = mcolors.LinearSegmentedColormap.from_list("rwg", ["#f4cccc", "#ffffff", "#77c38d"])
     
     target_cols = {
         'CR%': 'CR%',
-        'ПРОДУКТИВНОЕ ВРЕМЯ НА ОП': 'Продуктивное_сек_оп',
-        'ОПЛАТА НА ОП': 'ОПЛАТА НА ОП'
+        'Прод. время\nна ОП': 'Продуктивное_сек_оп',
+        'Оплата\nна ОП': 'ОПЛАТА НА ОП'
     }
     
     norms = {}
@@ -520,9 +528,11 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
             norms[final_col] = None
     
     for i, col_name in enumerate(final_df.columns):
+        # Шапка с уменьшенным шрифтом 10, чтобы переносы и текст не наезжали на края
         table[(0, i)].set_facecolor("#6aa84f")
         table[(0, i)].get_text().set_color("white")
         table[(0, i)].get_text().set_weight('bold')
+        table[(0, i)].get_text().set_fontsize(10)
         
         table[(1, i)].set_facecolor("#b6d7a8")
         table[(1, i)].get_text().set_weight('bold')
@@ -540,7 +550,6 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
             table[(j, i)].set_facecolor(bg_color)
     
     buf = io.BytesIO()
-    # Разрешение поднято до 250 dpi
     plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=250)
     buf.seek(0)
     plt.close()
