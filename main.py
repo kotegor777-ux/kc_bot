@@ -347,29 +347,169 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
     return buf
 
 async def process_comparative_report(message: Message, df: pd.DataFrame, is_weekly: bool):
-    df['Номер_Группы'] = df['Ответственный'].astype(str).str.extract(r'(\d{2})')
-    grouped = df.groupby('Номер_Группы').agg(
-        БАЗА=('Смен' if is_weekly else 'ФИО', 'sum' if is_weekly else 'count'), 
-        ОБРАБОТАНО=('Всего', 'sum'), УСПЕШНЫЕ=('Успешные', 'sum'),
-        НЕКОРРЕКТНЫЕ=('Некоректные', 'sum'), НЕДОЗВОН=('Недозвон', 'sum')
-    ).reset_index()
+    # Очистка и переименование колонок
+    df.columns = [str(c).strip() for c in df.columns]
+    for col in df.columns:
+        if 'период' in col.lower() or 'зп' in col.lower():
+            df.rename(columns={col: 'ЗП'}, inplace=True)
+            
+    df['Група'] = df['Ответственный'].astype(str).str.extract(r'(\d{2})')
+    df = df.dropna(subset=['Група'])
 
-    valid_calls = (grouped['ОБРАБОТАНО'] - grouped['НЕКОРРЕКТНЫЕ'] - grouped['НЕДОЗВОН'])
-    grouped['CR%'] = (grouped['УСПЕШНЫЕ'] / valid_calls.replace(0, 1)) * 100
-    grouped['ЗАЯВОК НА ЕД'] = grouped['ОБРАБОТАНО'] / grouped['БАЗА']
+    def time_to_seconds(t_str):
+        if pd.isnull(t_str): return 0
+        v = str(t_str).strip()
+        try:
+            if v.startswith('1900-01-'):
+                d_str, time_part = v.split(' ')
+                days = int(d_str.split('-')[2])
+                h, m, s = map(float, time_part.split(':'))
+                return days * 24 * 3600 + h * 3600 + m * 60 + s
+            elif 'day' in v:
+                parts = v.split(' ')
+                days = int(parts[0])
+                h, m, s = map(float, parts[-1].split(':'))
+                return days * 24 * 3600 + h * 3600 + m * 60 + s
+            parts = v.split(':')
+            if len(parts) >= 3:
+                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        except:
+            pass
+        return 0
+
+    def format_seconds_to_time(seconds):
+        if pd.isnull(seconds): return "0:00:00"
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = round(seconds % 60)
+        if s == 60: s, m = 0, m + 1
+        if m == 60: m, h = 0, h + 1
+        return f"{h}:{m:02d}:{s:02d}"
+
+    df['Рабочее_сек'] = df.get('Рабочее время', pd.Series([0]*len(df))).apply(time_to_seconds)
+    df['Перерыв_сек'] = df.get('Время перерывов', pd.Series([0]*len(df))).apply(time_to_seconds)
     
-    grouped = grouped.round(2)
-    fig, ax = plt.subplots(figsize=(10, len(grouped) * 0.4 + 1))
+    def clean_num(col_name):
+        if col_name in df.columns:
+            return pd.to_numeric(df[col_name].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', ''), errors='coerce').fillna(0)
+        return pd.Series([0]*len(df))
+
+    df['Успешные_num'] = clean_num('Успешные')
+    df['Всего_num'] = clean_num('Всего')
+    df['Недозвон_num'] = clean_num('Недозвон')
+    df['Некор_num'] = clean_num('Некорректные') if 'Некорректные' in df.columns else clean_num('Некор')
+    df['Смен_num'] = clean_num('Смен')
+    df['ЗП_num'] = clean_num('ЗП')
+    df['У_раб_места_num'] = clean_num('% у рабочего места')
+    
+    if df['У_раб_места_num'].mean() < 1.5:
+        df['У_раб_места_num'] *= 100
+
+    grouped = df.groupby('Група').agg(
+        Смен=('Смен_num', 'sum'),
+        ОБРАБОТАНО=('Всего_num', 'sum'),
+        УСПЕШНЫЕ=('Успешные_num', 'sum'),
+        Недозвон=('Недозвон_num', 'sum'),
+        Некор=('Некор_num', 'sum'),
+        Рабочее_сек=('Рабочее_сек', 'sum'),
+        Перерыв_сек=('Перерыв_сек', 'sum'),
+        ЗП=('ЗП_num', 'sum'),
+        У_раб_места=('У_раб_места_num', 'mean')
+    ).reset_index()
+    
+    # Если столбец смен пуст (один день), считаем по количеству строк
+    if grouped['Смен'].sum() == 0:
+        smen_counts = df.groupby('Група').size()
+        grouped['Смен'] = grouped['Група'].map(smen_counts)
+
+    # Математика по столбцам
+    grouped['CR%'] = (grouped['УСПЕШНЫЕ'] / (grouped['ОБРАБОТАНО'] - grouped['Недозвон'] - grouped['Некор']).replace(0, 1)) * 100
+    grouped['ЗАЯВОК НА ОП'] = grouped['ОБРАБОТАНО'] / grouped['Смен'].replace(0, 1)
+    grouped['УСПЕШЕК НА ОП'] = grouped['УСПЕШНЫЕ'] / grouped['Смен'].replace(0, 1)
+    grouped['Продуктивное_сек_оп'] = grouped['Рабочее_сек'] / grouped['Смен'].replace(0, 1)
+    grouped['Перерыв_сек_оп'] = grouped['Перерыв_сек'] / grouped['Смен'].replace(0, 1)
+    grouped['% ДОЗВОНА ДО ЧЕЛОВЕКА'] = ((grouped['ОБРАБОТАНО'] - grouped['Недозвон']) / grouped['ОБРАБОТАНО'].replace(0, 1)) * 100
+    grouped['ОПЛАТА'] = grouped['ЗП']
+    grouped['ОПЛАТА НА ОП'] = grouped['ОПЛАТА'] / grouped['Смен'].replace(0, 1)
+
+    # Финальная сборка таблицы
+    final_df = pd.DataFrame()
+    final_df['Група'] = grouped['Група']
+    final_df['CR%'] = grouped['CR%'].apply(lambda x: f"{x:.2f}%")
+    final_df['Смен'] = grouped['Смен'].astype(int)
+    final_df['ОБРАБОТАНО'] = grouped['ОБРАБОТАНО'].astype(int)
+    final_df['ЗАЯВОК НА ОП'] = grouped['ЗАЯВОК НА ОП'].apply(lambda x: f"{x:.2f}")
+    final_df['УСПЕШНЫЕ'] = grouped['УСПЕШНЫЕ'].astype(int)
+    final_df['УСПЕШЕК НА ОП'] = grouped['УСПЕШЕК НА ОП'].apply(lambda x: f"{x:.2f}")
+    final_df['ПРОДУКТИВНОЕ ВРЕМЯ НА ОП'] = grouped['Продуктивное_сек_оп'].apply(format_seconds_to_time)
+    final_df['ПЕРЕРЫВЫ НА ОП'] = grouped['Перерыв_сек_оп'].apply(format_seconds_to_time)
+    final_df['% У РАБОЧЕГО МЕСТА'] = grouped['У_раб_места'].apply(lambda x: f"{x:.2f}%")
+    final_df['% ДОЗВОНА ДО ЧЕЛОВЕКА'] = grouped['% ДОЗВОНА ДО ЧЕЛОВЕКА'].apply(lambda x: f"{x:.2f}%")
+    final_df['ОПЛАТА'] = grouped['ОПЛАТА'].apply(lambda x: f"{x:.2f}")
+    final_df['ОПЛАТА НА ОП'] = grouped['ОПЛАТА НА ОП'].apply(lambda x: f"{x:.2f}")
+
+    # Строка ИТОГО
+    total_smen = grouped['Смен'].sum()
+    total_obrabotano = grouped['ОБРАБОТАНО'].sum()
+    total_uspeshnye = grouped['УСПЕШНЫЕ'].sum()
+    total_nedozvon = grouped['Недозвон'].sum()
+    total_nekor = grouped['Некор'].sum()
+    total_rabochee_sek = grouped['Рабочее_сек'].sum()
+    total_pereryv_sek = grouped['Перерыв_сек'].sum()
+    total_zp = grouped['ЗП'].sum()
+    
+    total_cr = (total_uspeshnye / (total_obrabotano - total_nedozvon - total_nekor) * 100) if (total_obrabotano - total_nedozvon - total_nekor) > 0 else 0
+    total_zayavok_op = total_obrabotano / total_smen if total_smen > 0 else 0
+    total_uspeshek_op = total_uspeshnye / total_smen if total_smen > 0 else 0
+    total_prod_op = total_rabochee_sek / total_smen if total_smen > 0 else 0
+    total_pereryv_op = total_pereryv_sek / total_smen if total_smen > 0 else 0
+    total_rab_mesto = grouped['У_раб_места'].mean() 
+    total_dozvon = ((total_obrabotano - total_nedozvon) / total_obrabotano * 100) if total_obrabotano > 0 else 0
+    total_oplata_op = total_zp / total_smen if total_smen > 0 else 0
+
+    itogo_row = {
+        'Група': 'ИТОГО',
+        'CR%': f"{total_cr:.2f}%",
+        'Смен': int(total_smen),
+        'ОБРАБОТАНО': int(total_obrabotano),
+        'ЗАЯВОК НА ОП': f"{total_zayavok_op:.2f}",
+        'УСПЕШНЫЕ': int(total_uspeshnye),
+        'УСПЕШЕК НА ОП': f"{total_uspeshek_op:.2f}",
+        'ПРОДУКТИВНОЕ ВРЕМЯ НА ОП': format_seconds_to_time(total_prod_op),
+        'ПЕРЕРЫВЫ НА ОП': format_seconds_to_time(total_pereryv_op),
+        '% У РАБОЧЕГО МЕСТА': f"{total_rab_mesto:.2f}%",
+        '% ДОЗВОНА ДО ЧЕЛОВЕКА': f"{total_dozvon:.2f}%",
+        'ОПЛАТА': f"{total_zp:.2f}",
+        'ОПЛАТА НА ОП': f"{total_oplata_op:.2f}"
+    }
+    
+    final_df = pd.concat([pd.DataFrame([itogo_row]), final_df], ignore_index=True)
+
+    # Отрисовка таблицы
+    fig, ax = plt.subplots(figsize=(24, len(final_df) * 0.4 + 1)) 
     ax.axis('off')
-    table = ax.table(cellText=grouped.values, colLabels=grouped.columns, loc='center', cellLoc='center')
-    table.scale(1.2, 1.5)
     
-    for i in range(len(grouped.columns)):
-        table[(0, i)].set_facecolor("#4C566A")
+    cols_count = len(final_df.columns)
+    col_widths = [0.06] + [0.94 / (cols_count - 1)] * (cols_count - 1)
+    
+    table = ax.table(cellText=final_df.values, colLabels=final_df.columns, loc='center', cellLoc='center', colWidths=col_widths)
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.2, 1.8)
+    
+    for i in range(cols_count):
+        table[(0, i)].set_facecolor("#6aa84f")
         table[(0, i)].get_text().set_color("white")
+        table[(0, i)].get_text().set_weight('bold')
         
+        table[(1, i)].set_facecolor("#b6d7a8")
+        table[(1, i)].get_text().set_weight('bold')
+        
+        for j in range(2, len(final_df) + 1):
+            table[(j, i)].set_facecolor("#ffffff")
+    
     buf = io.BytesIO()
-    plt.savefig(buf, format='jpeg', bbox_inches='tight')
+    plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
     buf.seek(0)
     plt.close()
     
