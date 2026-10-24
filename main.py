@@ -15,12 +15,11 @@ BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Добавлена новая кнопка загрузки тегов
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Отчет в группу 2ч"), KeyboardButton(text="Сравнительный по ГП")],
         [KeyboardButton(text="Отчет в группу неделя"), KeyboardButton(text="Сравнительный по ГП неделя")],
-        [KeyboardButton(text="Загрузить базу тегов")]
+        [KeyboardButton(text="Анализ группы"), KeyboardButton(text="Загрузить базу тегов")]
     ],
     resize_keyboard=True
 )
@@ -34,12 +33,22 @@ class ReportFSM(StatesGroup):
 
 user_sessions = {}
 
+def split_text(text, limit=4000):
+    parts = []
+    while len(text) > limit:
+        split_idx = text.rfind('\n\n', 0, limit)
+        if split_idx == -1: split_idx = text.rfind('\n', 0, limit)
+        if split_idx == -1: split_idx = limit
+        parts.append(text[:split_idx])
+        text = text[split_idx:].strip()
+    if text: parts.append(text)
+    return parts
+
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Выберите тип отчета:", reply_markup=main_kb)
 
-# Обработчик загрузки базы тегов
 @dp.message(F.text == "Загрузить базу тегов")
 async def cmd_load_tags(message: Message, state: FSMContext):
     await message.answer("Отправьте Excel-файл с тегами.\nВ 1-м столбце должны быть ФИО, во 2-м столбце — Тег Telegram (например: @ivanov).")
@@ -68,7 +77,7 @@ async def process_tags_file(message: Message, state: FSMContext):
     finally:
         await state.clear()
 
-@dp.message(F.text.in_(["Отчет в группу 2ч", "Сравнительный по ГП", "Отчет в группу неделя", "Сравнительный по ГП неделя"]))
+@dp.message(F.text.in_(["Отчет в группу 2ч", "Сравнительный по ГП", "Отчет в группу неделя", "Сравнительный по ГП неделя", "Анализ группы"]))
 async def choose_report_type(message: Message, state: FSMContext):
     user_sessions[message.from_user.id] = {"type": message.text}
     await message.answer(f"Жду файл Excel для: {message.text}")
@@ -107,11 +116,10 @@ async def handle_staff_numbers(message: Message, state: FSMContext):
 async def handle_gp_average(message: Message, state: FSMContext):
     session = user_sessions.get(message.from_user.id, {})
     gp_avg_text = message.text.strip().replace(',', '.')
+    report_type = session.get("type")
     
-    try:
-        gp_avg_val = float(gp_avg_text)
-    except ValueError:
-        gp_avg_val = 0.0
+    try: gp_avg_val = float(gp_avg_text)
+    except ValueError: gp_avg_val = 0.0
 
     df_all = session.get("df")
     shtat = session.get("shtat")
@@ -120,10 +128,8 @@ async def handle_gp_average(message: Message, state: FSMContext):
     df_all.columns = [str(c).strip() for c in df_all.columns]
     rename_dict = {}
     for col in df_all.columns:
-        if 'период' in col.lower() or 'зп' in col.lower():
-            rename_dict[col] = 'ЗП'
-        elif 'последнее' in col.lower():
-            rename_dict[col] = 'Последнее действие'
+        if 'период' in col.lower() or 'зп' in col.lower(): rename_dict[col] = 'ЗП'
+        elif 'последнее' in col.lower(): rename_dict[col] = 'Последнее действие'
     df_all.rename(columns=rename_dict, inplace=True)
             
     group_series = df_all['Ответственный'].astype(str).str.extract(r'(\d{2})')[0]
@@ -131,6 +137,13 @@ async def handle_gp_average(message: Message, state: FSMContext):
             
     df_target_full = df_all[df_all['Ответственный'].astype(str).str.contains(target_group, na=False)].copy()
     
+    if report_type == "Анализ группы":
+        analysis_text = generate_analysis_text(df_target_full, gp_avg_val, target_group)
+        for chunk in split_text(analysis_text):
+            await message.answer(chunk, parse_mode="HTML")
+        await state.clear()
+        return
+
     def safe_sum_name(df, substr):
         col = next((c for c in df.columns if substr.lower() in str(c).lower()), None)
         if not col: return 0
@@ -144,26 +157,22 @@ async def handle_gp_average(message: Message, state: FSMContext):
         sum_nekor = safe_sum_name(df_target_full, 'некор') 
         sum_prinyatye = sum_vsego - sum_nedozvon - sum_nekor
         real_avg_usp = (sum_usp / sum_prinyatye * 100) if sum_prinyatye > 0 else None
-    except Exception:
-        real_avg_usp = None
+    except Exception: real_avg_usp = None
         
     try:
         sum_vsego = safe_sum_name(df_target_full, 'всего')
         sum_nedozvon = safe_sum_name(df_target_full, 'недозвон')
         real_avg_dozvon = ((sum_vsego - sum_nedozvon) / sum_vsego * 100) if sum_vsego > 0 else None
-    except Exception:
-        real_avg_dozvon = None
+    except Exception: real_avg_dozvon = None
         
     text_report = generate_group_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon, target_group)
-    await message.answer(text_report, parse_mode="HTML")
+    for chunk in split_text(text_report):
+        await message.answer(chunk, parse_mode="HTML")
     
     columns_to_keep = ['ФИО', 'Рабочее время', 'Время перерывов', '% у рабочего места', 
                        '% дозвона до человека', '% успешных по дозвону', 'Успешные', 'Всего']
-    
-    if 'ЗП' in df_all.columns:
-        columns_to_keep.append('ЗП')
-    if 'Последнее действие' in df_all.columns:
-        columns_to_keep.append('Последнее действие')
+    if 'ЗП' in df_all.columns: columns_to_keep.append('ЗП')
+    if 'Последнее действие' in df_all.columns: columns_to_keep.append('Последнее действие')
                        
     existing_cols = [c for c in columns_to_keep if c in df_target_full.columns]
     df_target = df_target_full[existing_cols]
@@ -172,25 +181,78 @@ async def handle_gp_average(message: Message, state: FSMContext):
     await message.answer_photo(photo=BufferedInputFile(image_bytes.read(), filename="report.jpg"), caption=f"Срез по группе {target_group}")
     await state.clear()
 
+def generate_analysis_text(df, gp_avg, target_group):
+    if df.empty: return f"Нет данных по {target_group} группе."
+    
+    def clean_pct(val):
+        if pd.isnull(val): return 0.0
+        v = str(val).replace('%', '').replace(',', '.').replace(' ', '')
+        try: 
+            res = float(v)
+            return res * 100 if res < 1.5 else res
+        except: return 0.0
+        
+    def clean_num(val):
+        if pd.isnull(val): return 0
+        v = str(val).replace(',', '.').replace(' ', '')
+        try: return float(v)
+        except: return 0
+
+    col_smen = next((c for c in df.columns if 'смен' in str(c).lower()), None)
+    col_vsego = next((c for c in df.columns if 'всего' in str(c).lower()), None)
+    col_rab = next((c for c in df.columns if 'рабочего' in str(c).lower()), None)
+    col_dozvon = next((c for c in df.columns if 'дозвона' in str(c).lower()), None)
+    col_cr = next((c for c in df.columns if 'успешных по' in str(c).lower()), None)
+
+    report_lines = [f"📊 <b>Анализ операторов группы {target_group}</b>\n"]
+    
+    for _, row in df.iterrows():
+        fio = str(row.get('ФИО', 'Неизвестно')).split('(')[0].strip()
+        if fio.upper() in ['СРЕДНЕЕ', 'ИТОГО'] or fio == 'nan': continue
+        
+        smen = clean_num(row[col_smen]) if col_smen else 1
+        if smen <= 0: smen = 1
+        vsego = clean_num(row[col_vsego]) if col_vsego else 0
+        intens = vsego / smen
+        
+        rab_mesto = clean_pct(row[col_rab]) if col_rab else 0
+        dozvon = clean_pct(row[col_dozvon]) if col_dozvon else 0
+        cr = clean_pct(row[col_cr]) if col_cr else 0
+        
+        issues = []
+        if intens > 0 and intens < 150:
+            issues.append(f"• Интенсивность: <b>{intens:.0f}</b> зв/смена (норма 150+). <i>Низкий темп прозвона, зависание в карточках.</i>")
+        if rab_mesto > 0 and rab_mesto < 70:
+            issues.append(f"• На рабочем месте: <b>{rab_mesto:.1f}%</b> (норма 70%+). <i>Нарушение дисциплины, долгие перерывы или системные простои.</i>")
+        if dozvon > 0:
+            if dozvon > 90:
+                issues.append(f"• Дозвон: <b>{dozvon:.1f}%</b> (норма до 90%). <i>Подозрение на ручной сброс вызовов.</i>")
+            elif dozvon < 86:
+                issues.append(f"• Дозвон: <b>{dozvon:.1f}%</b> (норма от 86%). <i>Долгое бездействие на линии.</i>")
+        if cr > 0 and gp_avg > 0 and cr < gp_avg:
+            issues.append(f"• Конверсия: <b>{cr:.2f}%</b> (цель {gp_avg:.2f}%). <i>Подтянуть отработку возражений, знание продукта и дожим.</i>")
+            
+        if issues:
+            report_lines.append(f"👤 <b>{fio}</b>")
+            report_lines.extend(issues)
+            report_lines.append("") 
+            
+    if len(report_lines) == 1:
+        return report_lines[0] + "\n✅ У всех операторов группы показатели в норме!"
+        
+    return "\n".join(report_lines).strip()
+
 def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_avg_dozvon=None, target_group="47"):
     df = df_all[df_all['Ответственный'].astype(str).str.contains(target_group, na=False)].copy()
-    if df.empty:
-        return f"Нет данных по {target_group} группе."
+    if df.empty: return f"Нет данных по {target_group} группе."
 
     def clean_pct(col):
         res = pd.to_numeric(df[col].astype(str).str.replace('%', '').str.replace(',', '.'), errors='coerce')
         return res * 100 if res.mean() < 1.5 else res
 
-    if real_avg_usp is not None:
-        avg_usp_dozvon = real_avg_usp
-    else:
-        avg_usp_dozvon = clean_pct('% успешных по дозвону').mean()
-        
-    if real_avg_dozvon is not None:
-        avg_dozvon = real_avg_dozvon
-    else:
-        avg_dozvon = clean_pct('% дозвона до человека').mean()
-        
+    avg_usp_dozvon = real_avg_usp if real_avg_usp is not None else clean_pct('% успешных по дозвону').mean()
+    avg_dozvon = real_avg_dozvon if real_avg_dozvon is not None else clean_pct('% дозвона до человека').mean()
+    
     avg_rab_mesto_series = clean_pct('% у рабочего места')
     avg_rab_mesto = avg_rab_mesto_series.mean()
     
@@ -220,40 +282,33 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
                 h, m, s = map(float, parts[-1].split(':'))
                 return days * 24 * 3600 + h * 3600 + m * 60 + s
             parts = v.split(':')
-            if len(parts) >= 3:
-                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-        except:
-            pass
+            if len(parts) >= 3: return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        except: pass
         return 0
 
     def format_seconds_to_time(seconds):
         h = int(seconds // 3600)
         m = int((seconds % 3600) // 60)
         s = round(seconds % 60)
-        if s == 60:
-            s, m = 0, m + 1
-            if m == 60: m, h = 0, h + 1
+        if s == 60: s, m = 0, m + 1
+        if m == 60: m, h = 0, h + 1
         return f"{h}:{m:02d}:{s:02d}"
 
     total_seconds = df['Рабочее время'].apply(time_to_seconds).sum()
     avg_seconds = total_seconds / fact_vyhod_count if fact_vyhod_count > 0 else 0
     prod_hours_str = format_seconds_to_time(avg_seconds)
 
-    # ПОДКЛЮЧЕНИЕ ТЕГОВ
     tags_dict = {}
     if os.path.exists("tags.json"):
         try:
-            with open("tags.json", "r", encoding="utf-8") as f:
-                tags_dict = json.load(f)
-        except:
-            pass
+            with open("tags.json", "r", encoding="utf-8") as f: tags_dict = json.load(f)
+        except: pass
 
     def get_tag(fio):
         fio_clean = str(fio).strip()
         if fio_clean in tags_dict: return tags_dict[fio_clean]
         for key, tag in tags_dict.items():
             if key.lower() in fio_clean.lower(): return tag
-        # Резерв - возвращает только ФИО без скобок, если тег не найден
         return fio_clean.split('(')[0].strip()
 
     cat1, cat2, cat3, cat4 = [], [], [], []
@@ -266,7 +321,7 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
     for i, row in df.iterrows():
         tag = get_tag(row.get('ФИО', ''))
         cr = cr_series.loc[i]
-        if pd.isnull(cr): continue
+        if pd.isnull(cr) or cr == 0: continue
         if cr >= t3: cat1.append(tag)
         elif cr >= t2: cat2.append(tag)
         elif cr >= t1: cat3.append(tag)
@@ -296,32 +351,23 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
 
 def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_avg_dozvon=None):
     df = df_original.copy()
-    
     pct_cols = [c for c in ['% у рабочего места', '% дозвона до человека', '% успешных по дозвону'] if c in df.columns]
     numeric_cols = [c for c in ['Успешные', 'Всего', 'ЗП'] if c in df.columns]
 
     for col in pct_cols:
         val = pd.to_numeric(df[col].astype(str).str.replace('%', '').str.replace(',', '.'), errors='coerce')
         df[col] = val * 100 if val.mean() < 1.5 else val
-        
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+    for col in numeric_cols: df[col] = pd.to_numeric(df[col], errors='coerce')
 
     avg_row = {col: '' for col in df.columns}
     avg_row['ФИО'] = 'СРЕДНЕЕ'
-    for col in pct_cols + numeric_cols:
-        avg_row[col] = df[col].mean()
+    for col in pct_cols + numeric_cols: avg_row[col] = df[col].mean()
         
-    if real_avg_usp is not None and '% успешных по дозвону' in avg_row:
-        avg_row['% успешных по дозвону'] = real_avg_usp
-        
-    if real_avg_dozvon is not None and '% дозвона до человека' in avg_row:
-        avg_row['% дозвона до человека'] = real_avg_dozvon
+    if real_avg_usp is not None and '% успешных по дозвону' in avg_row: avg_row['% успешных по дозвону'] = real_avg_usp
+    if real_avg_dozvon is not None and '% дозвона до человека' in avg_row: avg_row['% дозвона до человека'] = real_avg_dozvon
     
     df = pd.concat([df, pd.DataFrame([avg_row])], ignore_index=True)
-    
-    if '% успешных по дозвону' in df.columns:
-        df = df.sort_values(by='% успешных по дозвону', ascending=False).reset_index(drop=True)
+    if '% успешных по дозвону' in df.columns: df = df.sort_values(by='% успешных по дозвону', ascending=False).reset_index(drop=True)
     
     display_df = df.copy()
     
@@ -339,8 +385,7 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
                 days = int(parts[0])
                 h, m, s = map(float, parts[-1].split(':'))
                 return f"{days * 24 + int(h):02d}:{int(m):02d}:{int(s):02d}"
-        except:
-            pass
+        except: pass
         return v
 
     def safe_str(val):
@@ -350,10 +395,8 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
         if '1900-01-01' in v: v = v.replace('1900-01-01', '').strip()
         return v
 
-    for col in pct_cols:
-        display_df[col] = display_df[col].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) and x != '' else "")
-    for col in numeric_cols:
-        display_df[col] = display_df[col].apply(lambda x: f"{x:.0f}" if pd.notnull(x) and x != '' else "")
+    for col in pct_cols: display_df[col] = display_df[col].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) and x != '' else "")
+    for col in numeric_cols: display_df[col] = display_df[col].apply(lambda x: f"{x:.0f}" if pd.notnull(x) and x != '' else "")
 
     for col in df.columns:
         if col not in pct_cols and col not in numeric_cols and col != 'ФИО':
@@ -362,7 +405,6 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
 
     fig, ax = plt.subplots(figsize=(26, len(df) * 0.5 + 1.5))
     ax.axis('off')
-
     cols_count = len(display_df.columns)
     col_widths = [0.22] + [0.78 / (cols_count - 1)] * (cols_count - 1)
 
@@ -378,7 +420,6 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
         if not vals.empty: norm_dict[col] = mcolors.Normalize(vmin=vals.min(), vmax=vals.max())
 
     usp_col = '% успешных по дозвону'
-
     for i, col in enumerate(df.columns):
         table[(0, i)].get_text().set_fontsize(10)
         for j in range(len(df)):
@@ -468,19 +509,12 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     if df['У_раб_места_num'].mean() < 1.5: df['У_раб_места_num'] *= 100
 
     grouped = df.groupby('Группа').agg(
-        Смен=('Смен_num', 'sum'),
-        ОБРАБОТАНО=('Всего_num', 'sum'),
-        УСПЕШНЫЕ=('Успешные_num', 'sum'),
-        Недозвон=('Недозвон_num', 'sum'),
-        Некор=('Некор_num', 'sum'),
-        Рабочее_сек=('Рабочее_сек', 'sum'),
-        Перерыв_сек=('Перерыв_сек', 'sum'),
-        ЗП=('ЗП_num', 'sum'),
-        У_раб_места=('У_раб_места_num', 'mean')
+        Смен=('Смен_num', 'sum'), ОБРАБОТАНО=('Всего_num', 'sum'), УСПЕШНЫЕ=('Успешные_num', 'sum'),
+        Недозвон=('Недозвон_num', 'sum'), Некор=('Некор_num', 'sum'), Рабочее_сек=('Рабочее_сек', 'sum'),
+        Перерыв_сек=('Перерыв_сек', 'sum'), ЗП=('ЗП_num', 'sum'), У_раб_места=('У_раб_места_num', 'mean')
     ).reset_index()
     
-    if grouped['Смен'].sum() == 0:
-        grouped['Смен'] = grouped['Группа'].map(df.groupby('Группа').size())
+    if grouped['Смен'].sum() == 0: grouped['Смен'] = grouped['Группа'].map(df.groupby('Группа').size())
 
     grouped['CR%'] = (grouped['УСПЕШНЫЕ'] / (grouped['ОБРАБОТАНО'] - grouped['Недозвон'] - grouped['Некор']).replace(0, 1)) * 100
     grouped['ЗАЯВОК НА ОП'] = grouped['ОБРАБОТАНО'] / grouped['Смен'].replace(0, 1)
