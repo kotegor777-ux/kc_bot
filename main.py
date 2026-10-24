@@ -1,4 +1,6 @@
 import io
+import os
+import json
 import asyncio
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -13,10 +15,12 @@ BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Добавлена новая кнопка загрузки тегов
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Отчет в группу 2ч"), KeyboardButton(text="Сравнительный по ГП")],
-        [KeyboardButton(text="Отчет в группу неделя"), KeyboardButton(text="Сравнительный по ГП неделя")]
+        [KeyboardButton(text="Отчет в группу неделя"), KeyboardButton(text="Сравнительный по ГП неделя")],
+        [KeyboardButton(text="Загрузить базу тегов")]
     ],
     resize_keyboard=True
 )
@@ -26,6 +30,7 @@ class ReportFSM(StatesGroup):
     waiting_for_file = State()
     waiting_for_staff_numbers = State()
     waiting_for_gp_average = State()
+    waiting_for_tags_file = State()
 
 user_sessions = {}
 
@@ -33,7 +38,35 @@ user_sessions = {}
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Выберите тип отчета:", reply_markup=main_kb)
-    await state.set_state(ReportFSM.waiting_for_report_type)
+
+# Обработчик загрузки базы тегов
+@dp.message(F.text == "Загрузить базу тегов")
+async def cmd_load_tags(message: Message, state: FSMContext):
+    await message.answer("Отправьте Excel-файл с тегами.\nВ 1-м столбце должны быть ФИО, во 2-м столбце — Тег Telegram (например: @ivanov).")
+    await state.set_state(ReportFSM.waiting_for_tags_file)
+
+@dp.message(ReportFSM.waiting_for_tags_file, F.document)
+async def process_tags_file(message: Message, state: FSMContext):
+    try:
+        file = await bot.get_file(message.document.file_id)
+        downloaded = await bot.download_file(file.file_path)
+        df_tags = pd.read_excel(io.BytesIO(downloaded.read()))
+        
+        tags_dict = {}
+        for _, row in df_tags.iterrows():
+            fio = str(row.iloc[0]).strip()
+            tag = str(row.iloc[1]).strip()
+            if fio and fio != 'nan':
+                tags_dict[fio] = tag if tag != 'nan' else ""
+        
+        with open("tags.json", "w", encoding="utf-8") as f:
+            json.dump(tags_dict, f, ensure_ascii=False, indent=2)
+            
+        await message.answer(f"✅ База тегов успешно обновлена! Сохранено контактов: {len(tags_dict)}", reply_markup=main_kb)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при чтении файла. Убедитесь, что это Excel. Ошибка: {e}")
+    finally:
+        await state.clear()
 
 @dp.message(F.text.in_(["Отчет в группу 2ч", "Сравнительный по ГП", "Отчет в группу неделя", "Сравнительный по ГП неделя"]))
 async def choose_report_type(message: Message, state: FSMContext):
@@ -53,7 +86,7 @@ async def handle_file(message: Message, state: FSMContext):
     
     if "Сравнительный" in report_type:
         await process_comparative_report(message, df, "неделя" in report_type)
-        await state.set_state(ReportFSM.waiting_for_report_type)
+        await state.clear()
     else:
         await message.answer("Введите Штат и Кол-во человек (или смен) через пробел (например: 24 16):")
         await state.set_state(ReportFSM.waiting_for_staff_numbers)
@@ -109,7 +142,6 @@ async def handle_gp_average(message: Message, state: FSMContext):
         sum_vsego = safe_sum_name(df_target_full, 'всего')
         sum_nedozvon = safe_sum_name(df_target_full, 'недозвон')
         sum_nekor = safe_sum_name(df_target_full, 'некор') 
-        
         sum_prinyatye = sum_vsego - sum_nedozvon - sum_nekor
         real_avg_usp = (sum_usp / sum_prinyatye * 100) if sum_prinyatye > 0 else None
     except Exception:
@@ -138,7 +170,7 @@ async def handle_gp_average(message: Message, state: FSMContext):
         
     image_bytes = render_dataframe_to_image(df_target, gp_avg_val, real_avg_usp, real_avg_dozvon)
     await message.answer_photo(photo=BufferedInputFile(image_bytes.read(), filename="report.jpg"), caption=f"Срез по группе {target_group}")
-    await state.set_state(ReportFSM.waiting_for_report_type)
+    await state.clear()
 
 def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_avg_dozvon=None, target_group="47"):
     df = df_all[df_all['Ответственный'].astype(str).str.contains(target_group, na=False)].copy()
@@ -187,7 +219,6 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
                 days = int(parts[0])
                 h, m, s = map(float, parts[-1].split(':'))
                 return days * 24 * 3600 + h * 3600 + m * 60 + s
-            
             parts = v.split(':')
             if len(parts) >= 3:
                 return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
@@ -200,16 +231,52 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
         m = int((seconds % 3600) // 60)
         s = round(seconds % 60)
         if s == 60:
-            s = 0
-            m += 1
-            if m == 60:
-                m = 0
-                h += 1
+            s, m = 0, m + 1
+            if m == 60: m, h = 0, h + 1
         return f"{h}:{m:02d}:{s:02d}"
 
     total_seconds = df['Рабочее время'].apply(time_to_seconds).sum()
     avg_seconds = total_seconds / fact_vyhod_count if fact_vyhod_count > 0 else 0
     prod_hours_str = format_seconds_to_time(avg_seconds)
+
+    # ПОДКЛЮЧЕНИЕ ТЕГОВ
+    tags_dict = {}
+    if os.path.exists("tags.json"):
+        try:
+            with open("tags.json", "r", encoding="utf-8") as f:
+                tags_dict = json.load(f)
+        except:
+            pass
+
+    def get_tag(fio):
+        fio_clean = str(fio).strip()
+        if fio_clean in tags_dict: return tags_dict[fio_clean]
+        for key, tag in tags_dict.items():
+            if key.lower() in fio_clean.lower(): return tag
+        # Резерв - возвращает только ФИО без скобок, если тег не найден
+        return fio_clean.split('(')[0].strip()
+
+    cat1, cat2, cat3, cat4 = [], [], [], []
+    try: gp_avg_float = float(gp_avg.replace(',', '.'))
+    except: gp_avg_float = 0.0
+        
+    t1, t2, t3 = gp_avg_float * 0.70, gp_avg_float * 0.85, gp_avg_float * 1.15
+    cr_series = clean_pct('% успешных по дозвону')
+    
+    for i, row in df.iterrows():
+        tag = get_tag(row.get('ФИО', ''))
+        cr = cr_series.loc[i]
+        if pd.isnull(cr): continue
+        if cr >= t3: cat1.append(tag)
+        elif cr >= t2: cat2.append(tag)
+        elif cr >= t1: cat3.append(tag)
+        else: cat4.append(tag)
+        
+    tags_text = ""
+    if cat1: tags_text += "\n\n🔥 Не сбавляем темп, следим за продуктивным временем:\n" + " ".join(cat1)
+    if cat2: tags_text += "\n\n⚡ Тянемся выше ребят, вы все умеете, не перегуливаем перерывы и будет больше успешных и конверсия:\n" + " ".join(cat2)
+    if cat3: tags_text += "\n\n📈 Больше заявок = больше успешных = больше конверсия = больше заработок:\n" + " ".join(cat3)
+    if cat4: tags_text += "\n\n🎯 Следим за показателями, стараемся вытянуть как можно больше, про продуктивное время так же не забываем, от 6 часов не меньше:\n" + " ".join(cat4)
 
     return f"""
 <b>КЦ УД {target_group} Солянка прочее</b>
@@ -224,7 +291,7 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
 От 100 ЗВ - <b>{over_100_calls}/{int(fact_vyhod_count)}</b>
 Продуктивные часы: <b>{prod_hours_str}</b>
 
-Конва по ГП: <b>{gp_avg}</b>
+Конва по ГП: <b>{gp_avg}</b>{tags_text}
 """
 
 def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_avg_dozvon=None):
@@ -280,8 +347,7 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
         if pd.isnull(val): return ""
         v = str(val).strip()
         if v in ['NaT', 'nan', 'None', '']: return ""
-        if '1900-01-01' in v:
-            v = v.replace('1900-01-01', '').strip()
+        if '1900-01-01' in v: v = v.replace('1900-01-01', '').strip()
         return v
 
     for col in pct_cols:
@@ -291,10 +357,8 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
 
     for col in df.columns:
         if col not in pct_cols and col not in numeric_cols and col != 'ФИО':
-            if col in ['Рабочее время', 'Время перерывов']:
-                display_df[col] = display_df[col].apply(fix_time_format)
-            else:
-                display_df[col] = display_df[col].apply(safe_str)
+            if col in ['Рабочее время', 'Время перерывов']: display_df[col] = display_df[col].apply(fix_time_format)
+            else: display_df[col] = display_df[col].apply(safe_str)
 
     fig, ax = plt.subplots(figsize=(26, len(df) * 0.5 + 1.5))
     ax.axis('off')
@@ -308,27 +372,20 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
     table.scale(1.2, 2.2)
 
     rwg_cmap = mcolors.LinearSegmentedColormap.from_list("rwg", ["#f4cccc", "#ffffff", "#77c38d"])
-    
     norm_dict = {}
     for col in pct_cols + numeric_cols:
         vals = pd.to_numeric(df[df['ФИО'] != 'СРЕДНЕЕ'][col], errors='coerce').dropna()
-        if not vals.empty:
-            norm_dict[col] = mcolors.Normalize(vmin=vals.min(), vmax=vals.max())
+        if not vals.empty: norm_dict[col] = mcolors.Normalize(vmin=vals.min(), vmax=vals.max())
 
     usp_col = '% успешных по дозвону'
 
     for i, col in enumerate(df.columns):
-        # Ограничение размера шрифта для шапки, чтобы все влезало
         table[(0, i)].get_text().set_fontsize(10)
-        
         for j in range(len(df)):
             is_avg_row = (df.iloc[j]['ФИО'] == 'СРЕДНЕЕ')
             val = df.iloc[j][col]
             bg_color = "white"
-            
-            if is_avg_row:
-                bg_color = "#d9d2e9"
-            
+            if is_avg_row: bg_color = "#d9d2e9"
             if pd.notnull(val) and val != '':
                 v = pd.to_numeric(val, errors='coerce')
                 if pd.notnull(v):
@@ -339,23 +396,16 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
                         elif v < t3: bg_color = "#fff2cc"
                         elif v < t4: bg_color = "#b7e1cd"
                         else: bg_color = "#77c38d"
-                    
                     elif col in ['ФИО', 'Рабочее время', 'Время перерывов'] and not is_avg_row:
                         row_usp = pd.to_numeric(df.iloc[j][usp_col], errors='coerce')
-                        if pd.notnull(row_usp) and usp_col in norm_dict:
-                            bg_color = mcolors.to_hex(rwg_cmap(norm_dict[usp_col](row_usp)))
-                            
+                        if pd.notnull(row_usp) and usp_col in norm_dict: bg_color = mcolors.to_hex(rwg_cmap(norm_dict[usp_col](row_usp)))
                     elif col in pct_cols + numeric_cols and col in norm_dict and not is_avg_row:
                         bg_color = mcolors.to_hex(rwg_cmap(norm_dict[col](v)))
-
             table[(j+1, i)].set_facecolor(bg_color)
-        
         table[(0, i)].set_facecolor("#d9d2e9")
         table[(0, i)].get_text().set_color("black")
-        
         if col == 'ФИО':
-            for j in range(len(df) + 1):
-                table[(j, i)].get_text().set_horizontalalignment('left')
+            for j in range(len(df) + 1): table[(j, i)].get_text().set_horizontalalignment('left')
 
     buf = io.BytesIO()
     plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=250)
@@ -367,8 +417,7 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     df.columns = [str(c).strip() for c in df.columns]
     rename_dict = {}
     for col in df.columns:
-        if 'период' in col.lower() or 'зп' in col.lower():
-            rename_dict[col] = 'ЗП'
+        if 'период' in col.lower() or 'зп' in col.lower(): rename_dict[col] = 'ЗП'
     df.rename(columns=rename_dict, inplace=True)
             
     df['Группа'] = df['Ответственный'].astype(str).str.extract(r'(\d{2})')
@@ -389,10 +438,8 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
                 h, m, s = map(float, parts[-1].split(':'))
                 return days * 24 * 3600 + h * 3600 + m * 60 + s
             parts = v.split(':')
-            if len(parts) >= 3:
-                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-        except:
-            pass
+            if len(parts) >= 3: return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        except: pass
         return 0
 
     def format_seconds_to_time(seconds):
@@ -408,8 +455,7 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     df['Перерыв_сек'] = df.get('Время перерывов', pd.Series([0]*len(df))).apply(time_to_seconds)
     
     def clean_num(col_name):
-        if col_name in df.columns:
-            return pd.to_numeric(df[col_name].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', ''), errors='coerce').fillna(0)
+        if col_name in df.columns: return pd.to_numeric(df[col_name].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', ''), errors='coerce').fillna(0)
         return pd.Series([0]*len(df))
 
     df['Успешные_num'] = clean_num('Успешные')
@@ -419,9 +465,7 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     df['Смен_num'] = clean_num('Смен')
     df['ЗП_num'] = clean_num('ЗП')
     df['У_раб_места_num'] = clean_num('% у рабочего места')
-    
-    if df['У_раб_места_num'].mean() < 1.5:
-        df['У_раб_места_num'] *= 100
+    if df['У_раб_места_num'].mean() < 1.5: df['У_раб_места_num'] *= 100
 
     grouped = df.groupby('Группа').agg(
         Смен=('Смен_num', 'sum'),
@@ -436,8 +480,7 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     ).reset_index()
     
     if grouped['Смен'].sum() == 0:
-        smen_counts = df.groupby('Группа').size()
-        grouped['Смен'] = grouped['Группа'].map(smen_counts)
+        grouped['Смен'] = grouped['Группа'].map(df.groupby('Группа').size())
 
     grouped['CR%'] = (grouped['УСПЕШНЫЕ'] / (grouped['ОБРАБОТАНО'] - grouped['Недозвон'] - grouped['Некор']).replace(0, 1)) * 100
     grouped['ЗАЯВОК НА ОП'] = grouped['ОБРАБОТАНО'] / grouped['Смен'].replace(0, 1)
@@ -448,7 +491,6 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     grouped['ОПЛАТА'] = grouped['ЗП']
     grouped['ОПЛАТА НА ОП'] = grouped['ОПЛАТА'] / grouped['Смен'].replace(0, 1)
 
-    # Сокращенные названия колонок с переносом строк для компакности
     final_df = pd.DataFrame()
     final_df['Группа'] = grouped['Группа']
     final_df['CR%'] = grouped['CR%'].apply(lambda x: f"{x:.2f}%")
@@ -483,26 +525,15 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     total_oplata_op = total_zp / total_smen if total_smen > 0 else 0
 
     itogo_row = {
-        'Группа': 'ИТОГО',
-        'CR%': f"{total_cr:.2f}%",
-        'Смен': int(total_smen),
-        'Обрабо\n-тано': int(total_obrabotano),
-        'Заявок\nна ОП': f"{total_zayavok_op:.2f}",
-        'Успеш\n-ные': int(total_uspeshnye),
-        'Успешек\nна ОП': f"{total_uspeshek_op:.2f}",
-        'Прод. время\nна ОП': format_seconds_to_time(total_prod_op),
-        'Перерывы\nна ОП': format_seconds_to_time(total_pereryv_op),
-        '% у раб.\nместа': f"{total_rab_mesto:.2f}%",
-        '% дозвона': f"{total_dozvon:.2f}%",
-        'Оплата': f"{total_zp:.2f}",
-        'Оплата\nна ОП': f"{total_oplata_op:.2f}"
+        'Группа': 'ИТОГО', 'CR%': f"{total_cr:.2f}%", 'Смен': int(total_smen), 'Обрабо\n-тано': int(total_obrabotano),
+        'Заявок\nна ОП': f"{total_zayavok_op:.2f}", 'Успеш\n-ные': int(total_uspeshnye), 'Успешек\nна ОП': f"{total_uspeshek_op:.2f}",
+        'Прод. время\nна ОП': format_seconds_to_time(total_prod_op), 'Перерывы\nна ОП': format_seconds_to_time(total_pereryv_op),
+        '% у раб.\nместа': f"{total_rab_mesto:.2f}%", '% дозвона': f"{total_dozvon:.2f}%", 'Оплата': f"{total_zp:.2f}", 'Оплата\nна ОП': f"{total_oplata_op:.2f}"
     }
-    
     final_df = pd.concat([pd.DataFrame([itogo_row]), final_df], ignore_index=True)
 
     fig, ax = plt.subplots(figsize=(24, len(final_df) * 0.5 + 1.5)) 
     ax.axis('off')
-    
     cols_count = len(final_df.columns)
     col_widths = [0.06] + [0.94 / (cols_count - 1)] * (cols_count - 1)
     
@@ -512,48 +543,33 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     table.scale(1.2, 2.4)
     
     rwg_cmap = mcolors.LinearSegmentedColormap.from_list("rwg", ["#f4cccc", "#ffffff", "#77c38d"])
-    
-    target_cols = {
-        'CR%': 'CR%',
-        'Прод. время\nна ОП': 'Продуктивное_сек_оп',
-        'Оплата\nна ОП': 'ОПЛАТА НА ОП'
-    }
-    
+    target_cols = {'CR%': 'CR%', 'Прод. время\nна ОП': 'Продуктивное_сек_оп', 'Оплата\nна ОП': 'ОПЛАТА НА ОП'}
     norms = {}
     for final_col, raw_col in target_cols.items():
         vals = grouped[raw_col].dropna()
-        if not vals.empty and vals.max() > vals.min():
-            norms[final_col] = mcolors.Normalize(vmin=vals.min(), vmax=vals.max())
-        else:
-            norms[final_col] = None
+        if not vals.empty and vals.max() > vals.min(): norms[final_col] = mcolors.Normalize(vmin=vals.min(), vmax=vals.max())
+        else: norms[final_col] = None
     
     for i, col_name in enumerate(final_df.columns):
-        # Шапка с уменьшенным шрифтом 10, чтобы переносы и текст не наезжали на края
         table[(0, i)].set_facecolor("#6aa84f")
         table[(0, i)].get_text().set_color("white")
         table[(0, i)].get_text().set_weight('bold')
         table[(0, i)].get_text().set_fontsize(10)
-        
         table[(1, i)].set_facecolor("#b6d7a8")
         table[(1, i)].get_text().set_weight('bold')
-        
         for j in range(2, len(final_df) + 1):
             bg_color = "#ffffff"
             idx = j - 2 
-            
             if col_name in target_cols:
                 raw_col = target_cols[col_name]
                 val = grouped.iloc[idx][raw_col]
-                if pd.notnull(val) and norms[col_name] is not None:
-                    bg_color = mcolors.to_hex(rwg_cmap(norms[col_name](val)))
-                    
+                if pd.notnull(val) and norms[col_name] is not None: bg_color = mcolors.to_hex(rwg_cmap(norms[col_name](val)))
             table[(j, i)].set_facecolor(bg_color)
     
     buf = io.BytesIO()
     plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=250)
     buf.seek(0)
     plt.close()
-    
     await message.answer_photo(photo=BufferedInputFile(buf.read(), filename="comp.jpg"), caption=f"Сравнительный {'(Неделя)' if is_weekly else '(День)'}")
 
 async def main():
