@@ -90,7 +90,11 @@ async def handle_gp_average(message: Message, state: FSMContext):
         elif 'последнее' in col.lower():
             df_all.rename(columns={col: 'Последнее действие'}, inplace=True)
             
-    df_47_full = df_all[df_all['Ответственный'].astype(str).str.contains('47', na=False)].copy()
+    # Автоматическое определение номера группы
+    group_series = df_all['Ответственный'].astype(str).str.extract(r'(\d{2})')[0]
+    target_group = group_series.mode()[0] if not group_series.mode().empty else '47'
+            
+    df_target_full = df_all[df_all['Ответственный'].astype(str).str.contains(target_group, na=False)].copy()
     
     def safe_sum_name(df, substr):
         col = next((c for c in df.columns if substr.lower() in str(c).lower()), None)
@@ -99,10 +103,10 @@ async def handle_gp_average(message: Message, state: FSMContext):
         return pd.to_numeric(s, errors='coerce').sum()
 
     try:
-        sum_usp = safe_sum_name(df_47_full, 'успешные')
-        sum_vsego = safe_sum_name(df_47_full, 'всего')
-        sum_nedozvon = safe_sum_name(df_47_full, 'недозвон')
-        sum_nekor = safe_sum_name(df_47_full, 'некор') 
+        sum_usp = safe_sum_name(df_target_full, 'успешные')
+        sum_vsego = safe_sum_name(df_target_full, 'всего')
+        sum_nedozvon = safe_sum_name(df_target_full, 'недозвон')
+        sum_nekor = safe_sum_name(df_target_full, 'некор') 
         
         sum_prinyatye = sum_vsego - sum_nedozvon - sum_nekor
         real_avg_usp = (sum_usp / sum_prinyatye * 100) if sum_prinyatye > 0 else None
@@ -110,13 +114,13 @@ async def handle_gp_average(message: Message, state: FSMContext):
         real_avg_usp = None
         
     try:
-        sum_vsego = safe_sum_name(df_47_full, 'всего')
-        sum_nedozvon = safe_sum_name(df_47_full, 'недозвон')
+        sum_vsego = safe_sum_name(df_target_full, 'всего')
+        sum_nedozvon = safe_sum_name(df_target_full, 'недозвон')
         real_avg_dozvon = ((sum_vsego - sum_nedozvon) / sum_vsego * 100) if sum_vsego > 0 else None
     except Exception:
         real_avg_dozvon = None
         
-    text_report = generate_group_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon)
+    text_report = generate_group_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon, target_group)
     await message.answer(text_report, parse_mode="HTML")
     
     columns_to_keep = ['ФИО', 'Рабочее время', 'Время перерывов', '% у рабочего места', 
@@ -127,17 +131,17 @@ async def handle_gp_average(message: Message, state: FSMContext):
     if 'Последнее действие' in df_all.columns:
         columns_to_keep.append('Последнее действие')
                        
-    existing_cols = [c for c in columns_to_keep if c in df_47_full.columns]
-    df_47 = df_47_full[existing_cols]
+    existing_cols = [c for c in columns_to_keep if c in df_target_full.columns]
+    df_target = df_target_full[existing_cols]
         
-    image_bytes = render_dataframe_to_image(df_47, gp_avg_val, real_avg_usp, real_avg_dozvon)
-    await message.answer_photo(photo=BufferedInputFile(image_bytes.read(), filename="report.jpg"), caption="Срез по группе")
+    image_bytes = render_dataframe_to_image(df_target, gp_avg_val, real_avg_usp, real_avg_dozvon)
+    await message.answer_photo(photo=BufferedInputFile(image_bytes.read(), filename="report.jpg"), caption=f"Срез по группе {target_group}")
     await state.set_state(ReportFSM.waiting_for_report_type)
 
-def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_avg_dozvon=None):
-    df = df_all[df_all['Ответственный'].astype(str).str.contains('47', na=False)].copy()
+def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_avg_dozvon=None, target_group="47"):
+    df = df_all[df_all['Ответственный'].astype(str).str.contains(target_group, na=False)].copy()
     if df.empty:
-        return "Нет данных по 47 группе."
+        return f"Нет данных по {target_group} группе."
 
     def clean_pct(col):
         res = pd.to_numeric(df[col].astype(str).str.replace('%', '').str.replace(',', '.'), errors='coerce')
@@ -206,7 +210,7 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
     prod_hours_str = format_seconds_to_time(avg_seconds)
 
     return f"""
-<b>КЦ УД 47 Солянка прочее</b>
+<b>КЦ УД {target_group} Солянка прочее</b>
 % усп. по дозвону - <b>{avg_usp_dozvon:.2f}%</b>
 % дозвон до человека - <b>{avg_dozvon:.0f}%</b>
 % у рабочего места - <b>{avg_rab_mesto:.1f}</b>
@@ -347,7 +351,6 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
     return buf
 
 async def process_comparative_report(message: Message, df: pd.DataFrame, is_weekly: bool):
-    # Очистка и переименование колонок
     df.columns = [str(c).strip() for c in df.columns]
     for col in df.columns:
         if 'период' in col.lower() or 'зп' in col.lower():
@@ -492,7 +495,6 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     table.set_fontsize(9)
     table.scale(1.2, 1.8)
     
-    # Градиент красно-бело-зеленый для 3-х колонок
     rwg_cmap = mcolors.LinearSegmentedColormap.from_list("rwg", ["#f4cccc", "#ffffff", "#77c38d"])
     
     target_cols = {
@@ -510,16 +512,13 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
             norms[final_col] = None
     
     for i, col_name in enumerate(final_df.columns):
-        # Шапка
         table[(0, i)].set_facecolor("#6aa84f")
         table[(0, i)].get_text().set_color("white")
         table[(0, i)].get_text().set_weight('bold')
         
-        # Строка ИТОГО
         table[(1, i)].set_facecolor("#b6d7a8")
         table[(1, i)].get_text().set_weight('bold')
         
-        # Данные групп с заливкой 3-х целевых столбцов
         for j in range(2, len(final_df) + 1):
             bg_color = "#ffffff"
             idx = j - 2 
