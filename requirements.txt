@@ -1,0 +1,2 @@
+aiogram3.4.0, pandas2.2.0, matplotlib3.8.2, openpyxl3.1.2
+
