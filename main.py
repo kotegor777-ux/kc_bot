@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
 BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
-bot = Bot(token=BOT_Token)
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 main_kb = ReplyKeyboardMarkup(
