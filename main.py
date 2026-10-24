@@ -417,12 +417,10 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
         У_раб_места=('У_раб_места_num', 'mean')
     ).reset_index()
     
-    # Если столбец смен пуст (один день), считаем по количеству строк
     if grouped['Смен'].sum() == 0:
         smen_counts = df.groupby('Група').size()
         grouped['Смен'] = grouped['Група'].map(smen_counts)
 
-    # Математика по столбцам
     grouped['CR%'] = (grouped['УСПЕШНЫЕ'] / (grouped['ОБРАБОТАНО'] - grouped['Недозвон'] - grouped['Некор']).replace(0, 1)) * 100
     grouped['ЗАЯВОК НА ОП'] = grouped['ОБРАБОТАНО'] / grouped['Смен'].replace(0, 1)
     grouped['УСПЕШЕК НА ОП'] = grouped['УСПЕШНЫЕ'] / grouped['Смен'].replace(0, 1)
@@ -432,7 +430,6 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     grouped['ОПЛАТА'] = grouped['ЗП']
     grouped['ОПЛАТА НА ОП'] = grouped['ОПЛАТА'] / grouped['Смен'].replace(0, 1)
 
-    # Финальная сборка таблицы
     final_df = pd.DataFrame()
     final_df['Група'] = grouped['Група']
     final_df['CR%'] = grouped['CR%'].apply(lambda x: f"{x:.2f}%")
@@ -448,7 +445,6 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     final_df['ОПЛАТА'] = grouped['ОПЛАТА'].apply(lambda x: f"{x:.2f}")
     final_df['ОПЛАТА НА ОП'] = grouped['ОПЛАТА НА ОП'].apply(lambda x: f"{x:.2f}")
 
-    # Строка ИТОГО
     total_smen = grouped['Смен'].sum()
     total_obrabotano = grouped['ОБРАБОТАНО'].sum()
     total_uspeshnye = grouped['УСПЕШНЫЕ'].sum()
@@ -485,7 +481,6 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     
     final_df = pd.concat([pd.DataFrame([itogo_row]), final_df], ignore_index=True)
 
-    # Отрисовка таблицы
     fig, ax = plt.subplots(figsize=(24, len(final_df) * 0.4 + 1)) 
     ax.axis('off')
     
@@ -497,16 +492,45 @@ async def process_comparative_report(message: Message, df: pd.DataFrame, is_week
     table.set_fontsize(9)
     table.scale(1.2, 1.8)
     
-    for i in range(cols_count):
+    # Градиент красно-бело-зеленый для 3-х колонок
+    rwg_cmap = mcolors.LinearSegmentedColormap.from_list("rwg", ["#f4cccc", "#ffffff", "#77c38d"])
+    
+    target_cols = {
+        'CR%': 'CR%',
+        'ПРОДУКТИВНОЕ ВРЕМЯ НА ОП': 'Продуктивное_сек_оп',
+        'ОПЛАТА НА ОП': 'ОПЛАТА НА ОП'
+    }
+    
+    norms = {}
+    for final_col, raw_col in target_cols.items():
+        vals = grouped[raw_col].dropna()
+        if not vals.empty and vals.max() > vals.min():
+            norms[final_col] = mcolors.Normalize(vmin=vals.min(), vmax=vals.max())
+        else:
+            norms[final_col] = None
+    
+    for i, col_name in enumerate(final_df.columns):
+        # Шапка
         table[(0, i)].set_facecolor("#6aa84f")
         table[(0, i)].get_text().set_color("white")
         table[(0, i)].get_text().set_weight('bold')
         
+        # Строка ИТОГО
         table[(1, i)].set_facecolor("#b6d7a8")
         table[(1, i)].get_text().set_weight('bold')
         
+        # Данные групп с заливкой 3-х целевых столбцов
         for j in range(2, len(final_df) + 1):
-            table[(j, i)].set_facecolor("#ffffff")
+            bg_color = "#ffffff"
+            idx = j - 2 
+            
+            if col_name in target_cols:
+                raw_col = target_cols[col_name]
+                val = grouped.iloc[idx][raw_col]
+                if pd.notnull(val) and norms[col_name] is not None:
+                    bg_color = mcolors.to_hex(rwg_cmap(norms[col_name](val)))
+                    
+            table[(j, i)].set_facecolor(bg_color)
     
     buf = io.BytesIO()
     plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
