@@ -83,7 +83,6 @@ async def handle_gp_average(message: Message, state: FSMContext):
     shtat = session.get("shtat")
     smena = session.get("smena")
     
-    # Очистка и жесткий поиск нужных колонок по части слова
     df_all.columns = [str(c).strip() for c in df_all.columns]
     for col in df_all.columns:
         if 'период' in col.lower() or 'зп' in col.lower():
@@ -93,18 +92,22 @@ async def handle_gp_average(message: Message, state: FSMContext):
             
     df_47_full = df_all[df_all['Ответственный'].astype(str).str.contains('47', na=False)].copy()
     
-    # Правильный расчет конверсии SUM(X) / SUM(AY)
+    # Безопасное извлечение и очистка суммы с удалением пробелов и %
+    def safe_sum(df, col_idx):
+        if col_idx >= df.shape[1]: return 0
+        s = df.iloc[:, col_idx].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
+        return pd.to_numeric(s, errors='coerce').sum()
+
     try:
-        sum_x = pd.to_numeric(df_47_full.iloc[:, 23], errors='coerce').sum()
-        sum_ay = pd.to_numeric(df_47_full.iloc[:, 50], errors='coerce').sum()
+        sum_x = safe_sum(df_47_full, 23)
+        sum_ay = safe_sum(df_47_full, 50)
         real_avg_usp = (sum_x / sum_ay * 100) if sum_ay > 0 else None
     except Exception:
         real_avg_usp = None
         
-    # Правильный расчет дозвона (SUM(AE) - SUM(Y)) / SUM(AE)
     try:
-        sum_y = pd.to_numeric(df_47_full.iloc[:, 24], errors='coerce').sum()
-        sum_ae = pd.to_numeric(df_47_full.iloc[:, 30], errors='coerce').sum()
+        sum_y = safe_sum(df_47_full, 24)
+        sum_ae = safe_sum(df_47_full, 30)
         real_avg_dozvon = ((sum_ae - sum_y) / sum_ae * 100) if sum_ae > 0 else None
     except Exception:
         real_avg_dozvon = None
@@ -156,10 +159,13 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
     
     over_100_calls = len(df[pd.to_numeric(df['Всего'], errors='coerce') >= 100])
     
-    # Расчет числителя КПП из столбца AX (индекс 49)
     try:
-        ax_col = pd.to_numeric(df.iloc[:, 49], errors='coerce')
-        kpp_count = len(df[(ax_col > 0) & (ax_col <= 80)])
+        if 49 < df.shape[1]:
+            ax_col = df.iloc[:, 49].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.').str.replace('%', '')
+            ax_num = pd.to_numeric(ax_col, errors='coerce')
+            kpp_count = len(ax_num[(ax_num > 0) & (ax_num <= 80)])
+        else:
+            kpp_count = 0
     except Exception:
         kpp_count = 0
 
@@ -175,7 +181,13 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
     def format_seconds_to_time(seconds):
         h = int(seconds // 3600)
         m = int((seconds % 3600) // 60)
-        s = int(seconds % 60)
+        s = round(seconds % 60)
+        if s == 60:
+            s = 0
+            m += 1
+            if m == 60:
+                m = 0
+                h += 1
         return f"{h}:{m:02d}:{s:02d}"
 
     total_seconds = df['Рабочее время'].apply(time_to_seconds).sum()
