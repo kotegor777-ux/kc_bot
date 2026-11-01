@@ -20,7 +20,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
 BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
-# Укажите ID группы/канала, куда бот отправляет срез:
+# Укажите ID целевой группы Telegram (бот должен быть админом или иметь права на отправку)
 TARGET_TELEGRAM_GROUP_ID = -1000000000000
 
 bot = Bot(token=BOT_TOKEN)
@@ -60,10 +60,10 @@ DEFAULT_TEMPLATES = {
         "Реакции 🌹"
     ),
     "5": (
-        "Последний рывок вверх, дорабатываем часы и поднимаем конверсию 🚀"
+        "Последний рывок вверх, дорабатываем часы и поднимаем конверсию"
     ),
     "6": (
-        "Результаты за сегодня 🏁"
+        "Результаты за сегодня"
     ),
 }
 
@@ -98,7 +98,6 @@ class ReportFSM(StatesGroup):
     waiting_for_staff_numbers = State()
     waiting_for_gp_average = State()
     waiting_for_tags_file = State()
-    waiting_for_msg_choice = State()
     waiting_for_template_text = State()
 
 user_sessions = {}
@@ -123,7 +122,7 @@ def get_templates_keyboard():
         inline_keyboard=[
             [InlineKeyboardButton(text="Сообщение 1", callback_data="tmpl_select:1"), InlineKeyboardButton(text="Сообщение 2", callback_data="tmpl_select:2")],
             [InlineKeyboardButton(text="Сообщение 3", callback_data="tmpl_select:3"), InlineKeyboardButton(text="Сообщение 4", callback_data="tmpl_select:4")],
-            [InlineKeyboardButton(text="Сообщение 5", callback_data="tmpl_select:5"), InlineKeyboardButton(text="Сообщение 6", callback_data="tmpl_select:6")],
+            [InlineKeyboardButton(text="Сообщение 5", callback_data="tmpl_select:5"), InlineKeyboardButton(text="Сообщение 6 (⭐ Звезды)", callback_data="tmpl_select:6")],
         ]
     )
 
@@ -144,7 +143,7 @@ async def start_cmd(message: Message, state: FSMContext):
 @dp.message(F.text == "⚙️ Редактировать шаблоны")
 async def cmd_edit_templates(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Выберите номер сообщения, текст которого вы хотите изменить:", reply_markup=get_edit_templates_keyboard())
+    await message.answer("Выберите номер сообщения для редактирования:", reply_markup=get_edit_templates_keyboard())
 
 @dp.callback_query(F.data.startswith("tmpl_edit:"))
 async def callback_edit_template(call: CallbackQuery, state: FSMContext):
@@ -192,8 +191,8 @@ async def process_tags_file(message: Message, state: FSMContext):
         for _, row in df_tags.iterrows():
             fio = str(row.iloc[0]).strip()
             tag = str(row.iloc[1]).strip()
-            if fio and fio != "nan":
-                tags_dict[fio] = tag if tag != "nan" else ""
+            if fio and fio.lower() != "nan":
+                tags_dict[fio] = tag if tag.lower() != "nan" else ""
 
         with open("tags.json", "w", encoding="utf-8") as f:
             json.dump(tags_dict, f, ensure_ascii=False, indent=2)
@@ -285,8 +284,7 @@ async def handle_gp_average(message: Message, state: FSMContext):
     report_type = session.get("type", "")
 
     if report_type == "Срез для группы":
-        await message.answer("Выберите сообщение для среза группы:", reply_markup=get_templates_keyboard())
-        await state.set_state(ReportFSM.waiting_for_msg_choice)
+        await message.answer("Выберите шаблон сообщения для отправки в группу:", reply_markup=get_templates_keyboard())
     else:
         await process_report(message, state, session, selected_template="1")
 
@@ -294,7 +292,11 @@ async def handle_gp_average(message: Message, state: FSMContext):
 async def callback_select_template(call: CallbackQuery, state: FSMContext):
     tmpl_num = call.data.split(":")[1]
     session = user_sessions.get(call.from_user.id, {})
-    await call.message.edit_text(f"Выбрано: <b>Сообщение {tmpl_num}</b>", parse_mode="HTML")
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
     await process_report(call.message, state, session, selected_template=tmpl_num)
 
 async def process_report(message: Message, state: FSMContext, session: dict, selected_template: str = "1"):
@@ -357,7 +359,7 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
         except Exception:
             real_avg_dozvon = None
 
-        admin_report_text, tags_block = generate_group_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon, target_group)
+        admin_report_text = generate_admin_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon, target_group)
 
         columns_to_keep = [
             "ФИО",
@@ -383,8 +385,10 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
         image_bytes = render_dataframe_to_image(df_target, gp_avg_val, real_avg_usp, real_avg_dozvon)
         image_data = image_bytes.getvalue()
 
+        # Формируем тело поста в зависимости от выбранного шаблона (1..6)
+        group_post_text = build_group_message_text(template_body, df_target_full, selected_template, gp_avg_text)
+
         post_key = f"{message.chat.id}_{target_group}"
-        group_post_text = f"{template_body}\n\nКонва по ГП: <b>{gp_avg_text}%</b>{tags_block}"
         cached_group_posts[post_key] = {"img": image_data, "text": group_post_text}
 
         send_markup = InlineKeyboardMarkup(
@@ -392,12 +396,22 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
         )
 
         if is_group_only:
-            await message.answer_photo(
-                photo=BufferedInputFile(image_data, filename="group_slice.jpg"),
-                caption=group_post_text,
-                parse_mode="HTML",
-                reply_markup=send_markup,
-            )
+            # Обход лимита 1024 символа для Caption
+            if len(group_post_text) <= 1000:
+                await message.answer_photo(
+                    photo=BufferedInputFile(image_data, filename="group_slice.jpg"),
+                    caption=group_post_text,
+                    parse_mode="HTML",
+                    reply_markup=send_markup,
+                )
+            else:
+                await message.answer_photo(
+                    photo=BufferedInputFile(image_data, filename="group_slice.jpg"),
+                    caption=f"📊 <b>Срез по группе {target_group}</b>",
+                    parse_mode="HTML",
+                )
+                for chunk in split_text(group_post_text):
+                    await message.answer(chunk, parse_mode="HTML", reply_markup=send_markup)
         else:
             for chunk in split_text(admin_report_text):
                 await message.answer(chunk, parse_mode="HTML")
@@ -410,6 +424,63 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
 
     await state.clear()
 
+def get_tags_map():
+    tags_dict = {}
+    if os.path.exists("tags.json"):
+        try:
+            with open("tags.json", "r", encoding="utf-8") as f:
+                tags_dict = json.load(f)
+        except Exception:
+            pass
+    return tags_dict
+
+def get_tag_for_fio(fio, tags_dict):
+    fio_clean = str(fio).strip()
+    if fio_clean in tags_dict and tags_dict[fio_clean]:
+        return tags_dict[fio_clean]
+    for key, tag in tags_dict.items():
+        if key.lower() in fio_clean.lower() and tag:
+            return tag
+    return fio_clean.split("(")[0].strip()
+
+def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str, gp_avg_text: str) -> str:
+    tags_dict = get_tags_map()
+
+    # Сообщение 5: без тегов
+    if tmpl_num == "5":
+        return f"{template_body}\n\nКонва по ГП: <b>{gp_avg_text}%</b>"
+
+    # Сообщение 6: Звездочки по успешкам (лидеры)
+    if tmpl_num == "6":
+        df_valid = df.copy()
+        df_valid = df_valid[~df_valid["ФИО"].astype(str).str.upper().str.contains("СРЕДНЕЕ|ИТОГО")]
+        df_valid["Усп_число"] = pd.to_numeric(df_valid["Успешные"], errors="coerce").fillna(0)
+        df_valid = df_valid.sort_values(by="Усп_число", ascending=False)
+
+        top_lines = []
+        medals = ["⭐", "🌟", "✨"]
+        for i, (_, row) in enumerate(df_valid.head(5).iterrows()):
+            usp_val = int(row["Усп_число"])
+            if usp_val <= 0:
+                continue
+            icon = medals[i] if i < len(medals) else "🔸"
+            tag = get_tag_for_fio(row.get("ФИО", ""), tags_dict)
+            top_lines.append(f"{icon} {tag} — <b>{usp_val}</b> успешных")
+
+        stars_block = "\n".join(top_lines) if top_lines else "Пока нет успешных"
+        return f"🏆 <b>{template_body}</b>\n\nКонва по ГП: <b>{gp_avg_text}%</b>\n\n<b>Лидеры смены:</b>\n{stars_block}"
+
+    # Сообщения 1, 2, 3, 4: прикрепляем всех участников из среза
+    all_tags = []
+    for _, row in df.iterrows():
+        fio_raw = str(row.get("ФИО", "")).strip()
+        if not fio_raw or fio_raw.upper() in ["СРЕДНЕЕ", "ИТОГО", "NAN"]:
+            continue
+        all_tags.append(get_tag_for_fio(fio_raw, tags_dict))
+
+    tags_joined = " ".join(all_tags)
+    return f"{template_body}\n\nКонва по ГП: <b>{gp_avg_text}%</b>\n\n👥 {tags_joined}"
+
 @dp.callback_query(F.data.startswith("send_group:"))
 async def callback_send_to_group(call: CallbackQuery):
     post_key = call.data.split("send_group:")[1]
@@ -420,12 +491,24 @@ async def callback_send_to_group(call: CallbackQuery):
         return
 
     try:
-        await bot.send_photo(
-            chat_id=TARGET_TELEGRAM_GROUP_ID,
-            photo=BufferedInputFile(post_data["img"], filename="report.jpg"),
-            caption=post_data["text"],
-            parse_mode="HTML",
-        )
+        text = post_data["text"]
+        img = post_data["img"]
+
+        if len(text) <= 1000:
+            await bot.send_photo(
+                chat_id=TARGET_TELEGRAM_GROUP_ID,
+                photo=BufferedInputFile(img, filename="report.jpg"),
+                caption=text,
+                parse_mode="HTML",
+            )
+        else:
+            await bot.send_photo(
+                chat_id=TARGET_TELEGRAM_GROUP_ID,
+                photo=BufferedInputFile(img, filename="report.jpg"),
+            )
+            for chunk in split_text(text):
+                await bot.send_message(chat_id=TARGET_TELEGRAM_GROUP_ID, text=chunk, parse_mode="HTML")
+
         await call.answer("✅ Успешно отправлено в группу!", show_alert=True)
     except Exception as e:
         await call.answer(f"❌ Ошибка отправки: {e}", show_alert=True)
@@ -499,10 +582,10 @@ def generate_analysis_text(df, gp_avg, target_group):
 
     return "\n".join(report_lines).strip()
 
-def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_avg_dozvon=None, target_group="47"):
+def generate_admin_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_avg_dozvon=None, target_group="47"):
     df = df_all[df_all["Ответственный"].astype(str).str.contains(target_group, na=False)].copy()
     if df.empty:
-        return f"Нет данных по {target_group} группе.", ""
+        return f"Нет данных по {target_group} группе."
 
     def clean_pct(col):
         res = pd.to_numeric(df[col].astype(str).str.replace("%", "").str.replace(",", "."), errors="coerce")
@@ -560,55 +643,6 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
     avg_seconds = total_seconds / fact_vyhod_count if fact_vyhod_count > 0 else 0
     prod_hours_str = format_seconds_to_time(avg_seconds)
 
-    tags_dict = {}
-    if os.path.exists("tags.json"):
-        try:
-            with open("tags.json", "r", encoding="utf-8") as f:
-                tags_dict = json.load(f)
-        except Exception:
-            pass
-
-    def get_tag(fio):
-        fio_clean = str(fio).strip()
-        if fio_clean in tags_dict:
-            return tags_dict[fio_clean]
-        for key, tag in tags_dict.items():
-            if key.lower() in fio_clean.lower():
-                return tag
-        return fio_clean.split("(")[0].strip()
-
-    cat1, cat2, cat3 = [], [], []
-    try:
-        gp_avg_float = float(gp_avg.replace(",", "."))
-    except Exception:
-        gp_avg_float = 0.0
-
-    t_low, t_high = gp_avg_float * 0.85, gp_avg_float * 1.15
-    cr_series = clean_pct("% успешных по дозвону")
-
-    for i, row in df.iterrows():
-        fio_raw = row.get("ФИО", "")
-        if "СРЕДНЕЕ" in str(fio_raw).upper():
-            continue
-        tag = get_tag(fio_raw)
-        cr = cr_series.loc[i]
-        if pd.isnull(cr) or cr == 0:
-            continue
-        if cr >= t_high:
-            cat1.append(tag)
-        elif cr >= t_low:
-            cat2.append(tag)
-        else:
-            cat3.append(tag)
-
-    tags_text = ""
-    if cat1:
-        tags_text += "\n\n🔥 <b>Не сбавляем темп, следим за продуктивным временем:</b>\n" + " ".join(cat1)
-    if cat2:
-        tags_text += "\n\n⚡ <b>Тянемся выше ребят, не перегуливаем перерывы и будет больше успешных:</b>\n" + " ".join(cat2)
-    if cat3:
-        tags_text += "\n\n🎯 <b>Следим за показателями, стараемся вытянуть как можно больше (прод. время от 6 часов):</b>\n" + " ".join(cat3)
-
     admin_report = f"""<b>КЦ УД {target_group} Солянка прочее</b>
 % усп. по дозвону - <b>{avg_usp_dozvon:.2f}%</b>
 % дозвон до человека - <b>{avg_dozvon:.0f}%</b>
@@ -621,9 +655,9 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
 От 100 ЗВ - <b>{over_100_calls}/{int(fact_vyhod_count)}</b>
 Продуктивные часы: <b>{prod_hours_str}</b>
 
-Конва по ГП: <b>{gp_avg}</b>{tags_text}"""
+Конва по ГП: <b>{gp_avg}</b>"""
 
-    return admin_report, tags_text
+    return admin_report
 
 def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_avg_dozvon=None):
     df = df_original.copy()
@@ -763,7 +797,7 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
                     bg_color = "#fff2cc"
             else:
                 row_usp_val = pd.to_numeric(df.iloc[j].get(usp_col), errors="coerce")
-                
+
                 if col == "ФИО" or col == usp_col:
                     bg_color = get_usp_color(row_usp_val)
                 elif col in ["Рабочее время", "Время перерывов"]:
