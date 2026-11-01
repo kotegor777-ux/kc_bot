@@ -20,12 +20,66 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
 BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
-# Укажите ID группы/канала, куда бот будет отправлять срез по кнопке:
-# Например: -1001234567890 (для супергрупп)
+# Укажите ID группы/канала, куда бот отправляет срез:
 TARGET_TELEGRAM_GROUP_ID = -1000000000000
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+TEMPLATES_FILE = "templates.json"
+
+DEFAULT_TEMPLATES = {
+    "1": (
+        "Начинаем день активно, в темпе и с хорошим настроем! Сегодня наша задача - максимально поднять показатели и показать, на что мы способны. 😊\n\n"
+        "Особое внимание уделяем конверсии и рабочему времени - держим показатели на высоте и не теряем ни одной возможности! 💻\n\n"
+        "Утро - самая лучшая возможность задать хороший старт на всю смену. Помним, что до обеденного времени не берем перерывы и обеды 🏋️\n\n"
+        "Вы можете, вы лучшие 🤩\n\n"
+        "Реакции 🌹"
+    ),
+    "2": (
+        "Ребята, нужно поднажать, как мы умеем! Каждый дозвоненный клиент - наше золото, и наша задача забрать из него максимум: сохранить качество разговора и довести до успешного результата 📞\n\n"
+        "Зеленой зоны много - вы лучшие. Уже показываете, как нужно работать и держать результат ❤️\n\n"
+        "А те, кто пока ниже - я знаю, что ваше место тоже там. Отбрасываем сомнения, поднажимаем и подтягиваемся к своим коллегам 🏋️\n\n"
+        "Следим за категориями, стремимся не падать ниже 1-2, чтобы не сталкиваться с долгим поиском 🙈\n\n"
+        "Особое внимание сейчас на конверсию, пока проседаем, но еще есть время все исправить. Так что показываем результат лучших и забираем всё золото, которое есть 🤩\n\n"
+        "Не переживаем из-за поиска и таймера, мы видим технические проблемы и фиксики стараются максимально оперативно их подсвечивать и решать 😊\n\n"
+        "Дайте реакцию 🏳️"
+    ),
+    "3": (
+        "Звонков в обеденное время не так много, так что сейчас наша ключевая задача работать на качество каждого звонка и повышать конверсию, а так же следить за рабочим временем 👍\n\n"
+        "Поэтому сохраняем и удерживаем каждого клиента - дабы забрать все, что можем - золото и его душу 📞\n\n"
+        "Зеленой зоны много - Лучшие ❤️\n\n"
+        "Ребята которые ниже - знаю, что ваше место там же - пора поднажать и подходить к коллегам ❤️‍🩹\n\n"
+        "Дайте реакцию 😆"
+    ),
+    "4": (
+        "Ребята, собираемся и усиливаем показатели! 🏋️\n\n"
+        "Особенно делаем упор на продуктивное рабочее время и продолжаем держать конверсию. Наращиваем темп и забираем максимум из каждого звонка! 🚗\n\n"
+        "Вечером особенно важно не просесть - держим темп до самого конца. Старайтесь максимально дольше оставаться в линии и использовать рабочее время эффективно 💻\n\n"
+        "Показываем, на что способны! 🤩\n\n"
+        "Реакции 🌹"
+    ),
+    "5": (
+        "Последний рывок вверх, дорабатываем часы и поднимаем конверсию 🚀"
+    ),
+    "6": (
+        "Результаты за сегодня 🏁"
+    ),
+}
+
+def load_templates():
+    if os.path.exists(TEMPLATES_FILE):
+        try:
+            with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {**DEFAULT_TEMPLATES, **data}
+        except Exception:
+            pass
+    return DEFAULT_TEMPLATES.copy()
+
+def save_templates(templates):
+    with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
+        json.dump(templates, f, ensure_ascii=False, indent=2)
 
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
@@ -33,6 +87,7 @@ main_kb = ReplyKeyboardMarkup(
         [KeyboardButton(text="Отчет в группу 2ч"), KeyboardButton(text="Сравнительный по ГП")],
         [KeyboardButton(text="Отчет в группу неделя"), KeyboardButton(text="Сравнительный по ГП неделя")],
         [KeyboardButton(text="Анализ группы"), KeyboardButton(text="Загрузить базу тегов")],
+        [KeyboardButton(text="⚙️ Редактировать шаблоны")]
     ],
     resize_keyboard=True,
 )
@@ -43,9 +98,10 @@ class ReportFSM(StatesGroup):
     waiting_for_staff_numbers = State()
     waiting_for_gp_average = State()
     waiting_for_tags_file = State()
+    waiting_for_msg_choice = State()
+    waiting_for_template_text = State()
 
 user_sessions = {}
-# Кэш готовых сообщений для отправки в группу по callback-кнопке
 cached_group_posts = {}
 
 def split_text(text: str, limit: int = 4000):
@@ -62,10 +118,63 @@ def split_text(text: str, limit: int = 4000):
         parts.append(text)
     return parts
 
+def get_templates_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Сообщение 1", callback_data="tmpl_select:1"), InlineKeyboardButton(text="Сообщение 2", callback_data="tmpl_select:2")],
+            [InlineKeyboardButton(text="Сообщение 3", callback_data="tmpl_select:3"), InlineKeyboardButton(text="Сообщение 4", callback_data="tmpl_select:4")],
+            [InlineKeyboardButton(text="Сообщение 5", callback_data="tmpl_select:5"), InlineKeyboardButton(text="Сообщение 6", callback_data="tmpl_select:6")],
+        ]
+    )
+
+def get_edit_templates_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Сообщение 1", callback_data="tmpl_edit:1"), InlineKeyboardButton(text="✏️ Сообщение 2", callback_data="tmpl_edit:2")],
+            [InlineKeyboardButton(text="✏️ Сообщение 3", callback_data="tmpl_edit:3"), InlineKeyboardButton(text="✏️ Сообщение 4", callback_data="tmpl_edit:4")],
+            [InlineKeyboardButton(text="✏️ Сообщение 5", callback_data="tmpl_edit:5"), InlineKeyboardButton(text="✏️ Сообщение 6", callback_data="tmpl_edit:6")],
+        ]
+    )
+
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Выберите действие или тип отчета:", reply_markup=main_kb)
+
+@dp.message(F.text == "⚙️ Редактировать шаблоны")
+async def cmd_edit_templates(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Выберите номер сообщения, текст которого вы хотите изменить:", reply_markup=get_edit_templates_keyboard())
+
+@dp.callback_query(F.data.startswith("tmpl_edit:"))
+async def callback_edit_template(call: CallbackQuery, state: FSMContext):
+    msg_num = call.data.split(":")[1]
+    templates = load_templates()
+    current_text = templates.get(msg_num, "")
+
+    await state.update_data(editing_msg_num=msg_num)
+    await state.set_state(ReportFSM.waiting_for_template_text)
+
+    await call.message.answer(
+        f"Текущий текст для <b>Сообщения {msg_num}</b>:\n\n"
+        f"<i>{current_text}</i>\n\n"
+        "Отправьте в ответ новый текст сообщения:",
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+@dp.message(ReportFSM.waiting_for_template_text)
+async def process_new_template_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    msg_num = data.get("editing_msg_num")
+
+    if msg_num:
+        templates = load_templates()
+        templates[msg_num] = message.text.strip()
+        save_templates(templates)
+        await message.answer(f"✅ Текст для <b>Сообщения {msg_num}</b> успешно сохранен!", parse_mode="HTML", reply_markup=main_kb)
+
+    await state.clear()
 
 @dp.message(F.text == "Загрузить базу тегов")
 async def cmd_load_tags(message: Message, state: FSMContext):
@@ -173,10 +282,22 @@ async def handle_gp_average(message: Message, state: FSMContext):
     if not gp_averages:
         gp_averages = [0.0]
     session["gp_averages"] = gp_averages
+    report_type = session.get("type", "")
 
-    await process_report(message, state, session)
+    if report_type == "Срез для группы":
+        await message.answer("Выберите сообщение для среза группы:", reply_markup=get_templates_keyboard())
+        await state.set_state(ReportFSM.waiting_for_msg_choice)
+    else:
+        await process_report(message, state, session, selected_template="1")
 
-async def process_report(message: Message, state: FSMContext, session: dict):
+@dp.callback_query(F.data.startswith("tmpl_select:"))
+async def callback_select_template(call: CallbackQuery, state: FSMContext):
+    tmpl_num = call.data.split(":")[1]
+    session = user_sessions.get(call.from_user.id, {})
+    await call.message.edit_text(f"Выбрано: <b>Сообщение {tmpl_num}</b>", parse_mode="HTML")
+    await process_report(call.message, state, session, selected_template=tmpl_num)
+
+async def process_report(message: Message, state: FSMContext, session: dict, selected_template: str = "1"):
     df_all = session.get("df")
     target_groups = session.get("target_groups", ["47"])
     gp_averages = session.get("gp_averages", [0.0])
@@ -191,6 +312,9 @@ async def process_report(message: Message, state: FSMContext, session: dict):
         elif "последнее" in col.lower():
             rename_dict[col] = "Последнее действие"
     df_all.rename(columns=rename_dict, inplace=True)
+
+    templates = load_templates()
+    template_body = templates.get(selected_template, DEFAULT_TEMPLATES.get(selected_template, ""))
 
     for idx, target_group in enumerate(target_groups):
         gp_avg_val = gp_averages[idx] if idx < len(gp_averages) else gp_averages[-1]
@@ -233,9 +357,8 @@ async def process_report(message: Message, state: FSMContext, session: dict):
         except Exception:
             real_avg_dozvon = None
 
-        text_report, tags_block = generate_group_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon, target_group)
+        admin_report_text, tags_block = generate_group_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon, target_group)
 
-        # Выбираем колонки в зависимости от режима
         columns_to_keep = [
             "ФИО",
             "Рабочее время",
@@ -257,13 +380,11 @@ async def process_report(message: Message, state: FSMContext, session: dict):
         existing_cols = [c for c in columns_to_keep if c in df_target_full.columns]
         df_target = df_target_full[existing_cols]
 
-        # Генерация изображения с правильной окраской
         image_bytes = render_dataframe_to_image(df_target, gp_avg_val, real_avg_usp, real_avg_dozvon)
         image_data = image_bytes.getvalue()
 
-        # Кэшируем для кнопки отправки в рабочий чат
-        post_key = f"{message.from_user.id}_{target_group}"
-        group_post_text = f"📊 <b>Срез по группе {target_group}</b>\nКонва по ГП: <b>{gp_avg_text}%</b>{tags_block}"
+        post_key = f"{message.chat.id}_{target_group}"
+        group_post_text = f"{template_body}\n\nКонва по ГП: <b>{gp_avg_text}%</b>{tags_block}"
         cached_group_posts[post_key] = {"img": image_data, "text": group_post_text}
 
         send_markup = InlineKeyboardMarkup(
@@ -271,7 +392,6 @@ async def process_report(message: Message, state: FSMContext, session: dict):
         )
 
         if is_group_only:
-            # Для группы отдаем срез с тегами и кнопкой отправки
             await message.answer_photo(
                 photo=BufferedInputFile(image_data, filename="group_slice.jpg"),
                 caption=group_post_text,
@@ -279,8 +399,7 @@ async def process_report(message: Message, state: FSMContext, session: dict):
                 reply_markup=send_markup,
             )
         else:
-            # Для админки выдаем полный аналитический текст + полный срез (с ЗП и Последним действием)
-            for chunk in split_text(text_report):
+            for chunk in split_text(admin_report_text):
                 await message.answer(chunk, parse_mode="HTML")
 
             await message.answer_photo(
@@ -297,7 +416,7 @@ async def callback_send_to_group(call: CallbackQuery):
     post_data = cached_group_posts.get(post_key)
 
     if not post_data:
-        await call.answer("Данные среза устарели. Сформируйте заново.", show_alert=True)
+        await call.answer("Данные среза устарели. Сформируйте отчет заново.", show_alert=True)
         return
 
     try:
@@ -458,38 +577,37 @@ def generate_group_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
                 return tag
         return fio_clean.split("(")[0].strip()
 
-    cat1, cat2, cat3, cat4 = [], [], [], []
+    cat1, cat2, cat3 = [], [], []
     try:
         gp_avg_float = float(gp_avg.replace(",", "."))
     except Exception:
         gp_avg_float = 0.0
 
-    t1, t2, t3 = gp_avg_float * 0.70, gp_avg_float * 0.85, gp_avg_float * 1.15
+    t_low, t_high = gp_avg_float * 0.85, gp_avg_float * 1.15
     cr_series = clean_pct("% успешных по дозвону")
 
     for i, row in df.iterrows():
-        tag = get_tag(row.get("ФИО", ""))
+        fio_raw = row.get("ФИО", "")
+        if "СРЕДНЕЕ" in str(fio_raw).upper():
+            continue
+        tag = get_tag(fio_raw)
         cr = cr_series.loc[i]
         if pd.isnull(cr) or cr == 0:
             continue
-        if cr >= t3:
+        if cr >= t_high:
             cat1.append(tag)
-        elif cr >= t2:
+        elif cr >= t_low:
             cat2.append(tag)
-        elif cr >= t1:
-            cat3.append(tag)
         else:
-            cat4.append(tag)
+            cat3.append(tag)
 
     tags_text = ""
     if cat1:
-        tags_text += "\n\n🔥 Не сбавляем темп, следим за продуктивным временем:\n" + " ".join(cat1)
+        tags_text += "\n\n🔥 <b>Не сбавляем темп, следим за продуктивным временем:</b>\n" + " ".join(cat1)
     if cat2:
-        tags_text += "\n\n⚡ Тянемся выше ребят, не перегуливаем перерывы и будет больше успешных:\n" + " ".join(cat2)
+        tags_text += "\n\n⚡ <b>Тянемся выше ребят, не перегуливаем перерывы и будет больше успешных:</b>\n" + " ".join(cat2)
     if cat3:
-        tags_text += "\n\n📈 Больше заявок = больше успешных = больше конверсия:\n" + " ".join(cat3)
-    if cat4:
-        tags_text += "\n\n🎯 Следим за показателями, стараемся вытянуть как можно больше (прод. время от 6 часов):\n" + " ".join(cat4)
+        tags_text += "\n\n🎯 <b>Следим за показателями, стараемся вытянуть как можно больше (прод. время от 6 часов):</b>\n" + " ".join(cat3)
 
     admin_report = f"""<b>КЦ УД {target_group} Солянка прочее</b>
 % усп. по дозвону - <b>{avg_usp_dozvon:.2f}%</b>
@@ -518,7 +636,6 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Считаем строку СРЕДНЕЕ
     avg_row = {col: "" for col in df.columns}
     avg_row["ФИО"] = "СРЕДНЕЕ"
     for col in pct_cols + numeric_cols:
@@ -529,11 +646,9 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
     if real_avg_dozvon is not None and "% дозвона до человека" in avg_row:
         avg_row["% дозвона до человека"] = real_avg_dozvon
 
-    # Сортируем операторов по убыванию конверсии
     if "% успешных по дозвону" in df.columns:
         df = df.sort_values(by="% успешных по дозвону", ascending=False).reset_index(drop=True)
 
-    # Находим индекс для вставки строки СРЕДНЕЕ на ее законное место по рангу
     usp_avg_val = avg_row.get("% успешных по дозвону", 0.0)
     insert_idx = 0
     if "% успешных по дозвону" in df.columns:
@@ -649,10 +764,7 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
             else:
                 row_usp_val = pd.to_numeric(df.iloc[j].get(usp_col), errors="coerce")
                 
-                # Подсветка ФИО в цвет зоны конверсии
-                if col == "ФИО":
-                    bg_color = get_usp_color(row_usp_val)
-                elif col == usp_col:
+                if col == "ФИО" or col == usp_col:
                     bg_color = get_usp_color(row_usp_val)
                 elif col in ["Рабочее время", "Время перерывов"]:
                     bg_color = "#ffffff"
