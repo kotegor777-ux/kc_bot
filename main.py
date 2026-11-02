@@ -124,7 +124,6 @@ class ReportFSM(StatesGroup):
     waiting_for_gp_average = State()
     waiting_for_tags_file = State()
     waiting_for_template_text = State()
-    # Ветка для среза наставников
     waiting_for_mentor_mappings = State()
     waiting_for_mentor_file_before = State()
     waiting_for_mentor_file_after = State()
@@ -246,7 +245,6 @@ async def start_mentor_flow(message: Message, state: FSMContext):
 
 @dp.message(ReportFSM.waiting_for_mentor_mappings)
 async def process_mentor_mappings(message: Message, state: FSMContext):
-    # Разделяем по переносам строк, точкам или точкам с запятой
     raw_text = message.text.replace("\n", ".").replace(";", ".")
     blocks = [b.strip() for b in raw_text.split(".") if ":" in b]
 
@@ -569,9 +567,12 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
     df_all.columns = [str(c).strip() for c in df_all.columns]
     rename_dict = {}
     for col in df_all.columns:
-        if "период" in col.lower() or "зп" in col.lower():
+        c_low = col.lower()
+        if "период" in c_low or "зп" in c_low or "за период" in c_low:
             rename_dict[col] = "ЗП"
-        elif "последнее" in col.lower():
+        elif "категор" in c_low:
+            rename_dict[col] = "Категория"
+        elif "последнее" in c_low:
             rename_dict[col] = "Последнее действие"
     df_all.rename(columns=rename_dict, inplace=True)
 
@@ -621,6 +622,7 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
 
         admin_report_text = generate_admin_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon, target_group)
 
+        # Базовые колонки для среза группы
         columns_to_keep = [
             "ФИО",
             "Рабочее время",
@@ -630,12 +632,11 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
             "% успешных по дозвону",
             "Успешные",
             "Всего",
+            "Категория",
+            "ЗП",
         ]
 
-        is_group_only = (report_type == "Срез для группы")
-        if not is_group_only:
-            if "ЗП" in df_all.columns:
-                columns_to_keep.append("ЗП")
+        if report_type != "Срез для группы":
             if "Последнее действие" in df_all.columns:
                 columns_to_keep.append("Последнее действие")
 
@@ -654,7 +655,7 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
             inline_keyboard=[[InlineKeyboardButton(text="📤 Отправить в группу", callback_data=f"send_group:{post_key}")]]
         )
 
-        if is_group_only:
+        if report_type == "Срез для группы":
             if len(group_post_text) <= 1000:
                 await message.answer_photo(
                     photo=BufferedInputFile(image_data, filename="group_slice.jpg"),
@@ -917,13 +918,13 @@ def generate_admin_text(df_all, shtat, smena, gp_avg, real_avg_usp=None, real_av
 def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_avg_dozvon=None):
     df = df_original.copy()
     pct_cols = [c for c in ["% у рабочего места", "% дозвона до человека", "% успешных по дозвону"] if c in df.columns]
-    numeric_cols = [c for c in ["Успешные", "Всего", "ЗП"] if c in df.columns]
+    numeric_cols = [c for c in ["Успешные", "Всего", "ЗП", "Категория"] if c in df.columns]
 
     for col in pct_cols:
         val = pd.to_numeric(df[col].astype(str).str.replace("%", "").str.replace(",", "."), errors="coerce")
         df[col] = val * 100 if val.mean() < 1.5 else val
     for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = pd.to_numeric(df[col].astype(str).str.replace(",", "."), errors="coerce")
 
     avg_row = {col: "" for col in df.columns}
     avg_row["ФИО"] = "СРЕДНЕЕ"
@@ -985,8 +986,11 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
 
     for col in pct_cols:
         display_df[col] = display_df[col].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) and x != "" else "")
-    for col in numeric_cols:
-        display_df[col] = display_df[col].apply(lambda x: f"{x:.0f}" if pd.notnull(x) and x != "" else "")
+    for col in ["Успешные", "Всего", "ЗП"]:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(lambda x: f"{x:.0f}" if pd.notnull(x) and x != "" else "")
+    if "Категория" in display_df.columns:
+        display_df["Категория"] = display_df["Категория"].apply(lambda x: f"{x:.2f}" if pd.notnull(x) and x != "" else "")
 
     for col in df.columns:
         if col not in pct_cols and col not in numeric_cols and col != "ФИО":
@@ -995,10 +999,10 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
             else:
                 display_df[col] = display_df[col].apply(safe_str)
 
-    fig, ax = plt.subplots(figsize=(24, len(df) * 0.48 + 1.6))
+    fig, ax = plt.subplots(figsize=(26, len(df) * 0.48 + 1.6))
     ax.axis("off")
     cols_count = len(display_df.columns)
-    col_widths = [0.24] + [0.76 / (cols_count - 1)] * (cols_count - 1)
+    col_widths = [0.22] + [0.78 / (cols_count - 1)] * (cols_count - 1)
 
     table = ax.table(
         cellText=display_df.values,
@@ -1013,7 +1017,7 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
 
     rwg_cmap = mcolors.LinearSegmentedColormap.from_list("rwg", ["#f4cccc", "#ffffff", "#77c38d"])
     norm_dict = {}
-    for col in pct_cols + numeric_cols:
+    for col in pct_cols + [c for c in numeric_cols if c != "Категория"]:
         vals = pd.to_numeric(df[df["ФИО"] != "СРЕДНЕЕ"][col], errors="coerce").dropna()
         if not vals.empty:
             norm_dict[col] = mcolors.Normalize(vmin=vals.min(), vmax=vals.max())
@@ -1055,7 +1059,7 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
 
                 if col == "ФИО" or col == usp_col:
                     bg_color = get_usp_color(row_usp_val)
-                elif col in ["Рабочее время", "Время перерывов"]:
+                elif col in ["Рабочее время", "Время перерывов", "Категория"]:
                     bg_color = "#ffffff"
                 elif col in pct_cols + numeric_cols and col in norm_dict:
                     v_num = pd.to_numeric(val, errors="coerce")
