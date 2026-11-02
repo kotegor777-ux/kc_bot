@@ -237,27 +237,30 @@ async def process_tags_file(message: Message, state: FSMContext):
 async def start_mentor_flow(message: Message, state: FSMContext):
     await state.clear()
     help_text = (
-        "Введите привязку Наставников и Операторов (каждая пара с новой строки).\n\n"
-        "<b>Формат:</b>\n"
-        "<code>ФИО Наставника: Фамилия1, Фамилия2</code>\n\n"
+        "Введите привязку Наставников и Операторов (можно в одну строку через точку или с новой строки).\n\n"
         "<b>Пример:</b>\n"
-        "<code>Лазарева Вероника: Денисюк, Гаджикеримова, Шафикова\n"
-        "Шалунова Мишель: Урухин\n"
-        "Завгородняя Дарья: Григорян, Кафиан</code>"
+        "<code>Шалунова Мишель: Кафиан Алина. Лазарева Вероника: Денисюк, Гаджикеримова</code>"
     )
     await message.answer(help_text, parse_mode="HTML")
     await state.set_state(ReportFSM.waiting_for_mentor_mappings)
 
 @dp.message(ReportFSM.waiting_for_mentor_mappings)
 async def process_mentor_mappings(message: Message, state: FSMContext):
-    lines = [line.strip() for line in message.text.split("\n") if ":" in line]
-    if not lines:
-        await message.answer("Не найден символ двоеточия `:`. Введите в формате:\n<code>ФИО Наставника: Фамилия1, Фамилия2</code>", parse_mode="HTML")
+    # Разделяем по переносам строк, точкам или точкам с запятой
+    raw_text = message.text.replace("\n", ".").replace(";", ".")
+    blocks = [b.strip() for b in raw_text.split(".") if ":" in b]
+
+    if not blocks:
+        await message.answer(
+            "Не найден формат `Наставник: Операторы`. Пример:\n"
+            "<code>Шалунова Мишель: Кафиан Алина. Лазарева Вероника: Денисюк, Гаджикеримова</code>",
+            parse_mode="HTML"
+        )
         return
 
     mentor_map = []
-    for line in lines:
-        mentor, ops_str = line.split(":", 1)
+    for block in blocks:
+        mentor, ops_str = block.split(":", 1)
         mentor_clean = mentor.strip()
         ops = [op.strip() for op in ops_str.split(",") if op.strip()]
         for op in ops:
