@@ -25,15 +25,21 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
 BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
-TARGET_TELEGRAM_GROUP_ID = -1000000000000
+TARGET_TELEGRAM_GROUP_ID = -1005538702799
 
-# Список ID администраторов с доступом к боту
-ADMIN_IDS = [294001568, 210925919]
+# Список ID администраторов и доверенной группы
+ADMIN_IDS = [
+    294001568,
+    210925919,
+    5538702799,
+    -5538702799,
+    -1005538702799,
+]
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Middleware проверки прав доступа
+# Middleware проверки прав доступа (по user.id и chat.id)
 class AdminAccessMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -42,12 +48,18 @@ class AdminAccessMiddleware(BaseMiddleware):
         data: Dict[str, Any]
     ) -> Any:
         user = data.get("event_from_user")
-        if user and user.id not in ADMIN_IDS:
+        chat = data.get("event_chat")
+
+        is_user_allowed = user and user.id in ADMIN_IDS
+        is_chat_allowed = chat and chat.id in ADMIN_IDS
+
+        if not (is_user_allowed or is_chat_allowed):
             if isinstance(event, Message):
                 await event.answer("⛔ У вас нет доступа к этому боту.")
             elif isinstance(event, CallbackQuery):
                 await event.answer("⛔ У вас нет доступа к этому боту.", show_alert=True)
             return
+
         return await handler(event, data)
 
 dp.message.outer_middleware(AdminAccessMiddleware())
