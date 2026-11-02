@@ -4,6 +4,7 @@ import re
 import html
 import json
 import math
+import random
 import asyncio
 from typing import Callable, Dict, Any, Awaitable
 import pandas as pd
@@ -19,21 +20,28 @@ from aiogram.types import (
     InlineKeyboardButton,
     CallbackQuery,
     BufferedInputFile,
+    ReactionTypeEmoji,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
 BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
-TARGET_TELEGRAM_GROUP_ID = -1000000000000
+TARGET_TELEGRAM_GROUP_ID = -1005538702799
 
-# Список ID администраторов с доступом к боту
-ADMIN_IDS = [294001568, 210925919]
+# Список ID администраторов и доверенной группы
+ADMIN_IDS = [
+    294001568,
+    210925919,
+    5538702799,
+    -5538702799,
+    -1005538702799,
+]
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Middleware проверки прав доступа
+# Middleware проверки прав доступа (по user.id и chat.id)
 class AdminAccessMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -42,12 +50,29 @@ class AdminAccessMiddleware(BaseMiddleware):
         data: Dict[str, Any]
     ) -> Any:
         user = data.get("event_from_user")
-        if user and user.id not in ADMIN_IDS:
+        chat = data.get("event_chat")
+
+        is_user_allowed = user and user.id in ADMIN_IDS
+        is_chat_allowed = chat and chat.id in ADMIN_IDS
+
+        # Если сообщение пришло из группы от обычного участника — разрешаем только фоновые реакции/шутку,
+        # блокируя выполнение любых рабочих команд и кнопок отчетов
+        if not (is_user_allowed or is_chat_allowed):
             if isinstance(event, Message):
-                await event.answer("⛔ У вас нет доступа к этому боту.")
+                # Если обычный участник пытается выполнить команду или нажать кнопку меню в ЛС
+                if event.chat.type == "private":
+                    await event.answer("⛔ У вас нет доступа к этому боту.")
+                    return
+                # В группе для обычных участников обработка меню и FSM блокируется
+                # Оставляем только фоновую реакцию/шутку (но не управление отчетами)
+                if event.text and any(event.text.startswith(cmd) for cmd in ["/", "Срез", "Сравнительный", "Анализ", "⚙️", "Загрузить"]):
+                    return
+                # Передаем дальше для триггера пасхалки/реакции в группе
+                return await handler(event, data)
             elif isinstance(event, CallbackQuery):
-                await event.answer("⛔ У вас нет доступа к этому боту.", show_alert=True)
-            return
+                await event.answer("⛔ У вас нет доступа к этому действию.", show_alert=True)
+                return
+
         return await handler(event, data)
 
 dp.message.outer_middleware(AdminAccessMiddleware())
@@ -213,6 +238,36 @@ def get_edit_templates_keyboard():
             [InlineKeyboardButton(text="✏️ Сообщение 5", callback_data="tmpl_edit:5"), InlineKeyboardButton(text="✏️ Сообщение 6", callback_data="tmpl_edit:6")],
         ]
     )
+
+# ==================== РЕАКЦИИ И ШУТКИ ====================
+ALLOWED_EMOJIS = ["👍", "🔥", "❤️", "👏", "⚡", "😎"]
+
+@dp.message(F.chat.type.in_(["group", "supergroup"]))
+async def group_messages_handler(message: Message):
+    if not message.text:
+        return
+
+    text_lower = message.text.lower()
+    bot_info = await bot.get_me()
+    is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_info.id
+    is_bot_mentioned = f"@{bot_info.username.lower()}" in text_lower or "бота" in text_lower or "ботик" in text_lower or "виталя" in text_lower
+
+    # Пасхалка: шутит в ответ строго этой фразой
+    if is_reply_to_bot or is_bot_mentioned or "кто ты" in text_lower or "ты кто" in text_lower:
+        await message.reply("меня зовут Виталя и я реальный кекс")
+        return
+
+    # Случайный лайк (реакция) на сообщение участника
+    if random.random() < 0.12:
+        try:
+            chosen_emoji = random.choice(ALLOWED_EMOJIS)
+            await bot.set_message_reaction(
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reaction=[ReactionTypeEmoji(emoji=chosen_emoji)]
+            )
+        except Exception:
+            pass
 
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
