@@ -1,6 +1,7 @@
 import io
 import os
 import json
+import math
 import asyncio
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -20,7 +21,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
 BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
-# Укажите ID целевой группы Telegram (бот должен быть админом или иметь права на отправку)
 TARGET_TELEGRAM_GROUP_ID = -1000000000000
 
 bot = Bot(token=BOT_TOKEN)
@@ -84,10 +84,10 @@ def save_templates(templates):
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Срез для группы"), KeyboardButton(text="Срез для админки")],
-        [KeyboardButton(text="Отчет в группу 2ч"), KeyboardButton(text="Сравнительный по ГП")],
-        [KeyboardButton(text="Отчет в группу неделя"), KeyboardButton(text="Сравнительный по ГП неделя")],
-        [KeyboardButton(text="Анализ группы"), KeyboardButton(text="Загрузить базу тегов")],
-        [KeyboardButton(text="⚙️ Редактировать шаблоны")]
+        [KeyboardButton(text="Срез для наставников"), KeyboardButton(text="Сравнительный по ГП")],
+        [KeyboardButton(text="Отчет в группу 2ч"), KeyboardButton(text="Сравнительный по ГП неделя")],
+        [KeyboardButton(text="Отчет в группу неделя"), KeyboardButton(text="Анализ группы")],
+        [KeyboardButton(text="Загрузить базу тегов"), KeyboardButton(text="⚙️ Редактировать шаблоны")],
     ],
     resize_keyboard=True,
 )
@@ -99,6 +99,10 @@ class ReportFSM(StatesGroup):
     waiting_for_gp_average = State()
     waiting_for_tags_file = State()
     waiting_for_template_text = State()
+    # FSM для среза наставников
+    waiting_for_mentor_mappings = State()
+    waiting_for_mentor_file_before = State()
+    waiting_for_mentor_file_after = State()
 
 user_sessions = {}
 cached_group_posts = {}
@@ -203,6 +207,237 @@ async def process_tags_file(message: Message, state: FSMContext):
     finally:
         await state.clear()
 
+# ==================== ВЕТКА НАСТАВНИКОВ ====================
+@dp.message(F.text == "Срез для наставников")
+async def start_mentor_flow(message: Message, state: FSMContext):
+    await state.clear()
+    help_text = (
+        "Введите привязку Наставников и Операторов (каждая пара с новой строки).\n\n"
+        "<b>Формат:</b>\n"
+        "<code>ФИО Наставника: Фамилия1, Фамилия2</code>\n\n"
+        "<b>Пример:</b>\n"
+        "<code>Лазарева Вероника: Денисюк, Гаджикеримова, Шафикова\n"
+        "Шалунова Мишель: Урухин\n"
+        "Завгородняя Дарья: Григорян, Кафиан</code>"
+    )
+    await message.answer(help_text, parse_mode="HTML")
+    await state.set_state(ReportFSM.waiting_for_mentor_mappings)
+
+@dp.message(ReportFSM.waiting_for_mentor_mappings)
+async def process_mentor_mappings(message: Message, state: FSMContext):
+    lines = [line.strip() for line in message.text.split("\n") if ":" in line]
+    if not lines:
+        await message.answer("Не найден символ двоеточия `:`. Введите в формате:\n<code>ФИО Наставника: Фамилия1, Фамилия2</code>", parse_mode="HTML")
+        return
+
+    mentor_map = []
+    for line in lines:
+        mentor, ops_str = line.split(":", 1)
+        mentor_clean = mentor.strip()
+        ops = [op.strip() for op in ops_str.split(",") if op.strip()]
+        for op in ops:
+            mentor_map.append({"mentor": mentor_clean, "op_query": op})
+
+    user_sessions[message.from_user.id] = {"mentor_map": mentor_map}
+    await message.answer(f"Принято связок: {len(mentor_map)}.\nТеперь отправьте Excel-файл <b>«ДО»</b>:", parse_mode="HTML")
+    await state.set_state(ReportFSM.waiting_for_mentor_file_before)
+
+@dp.message(ReportFSM.waiting_for_mentor_file_before, F.document)
+async def handle_mentor_file_before(message: Message, state: FSMContext):
+    file = await bot.get_file(message.document.file_id)
+    downloaded = await bot.download_file(file.file_path)
+    df_before = pd.read_excel(io.BytesIO(downloaded.read()))
+
+    session = user_sessions.setdefault(message.from_user.id, {})
+    session["df_before"] = df_before
+    await message.answer("Файл «ДО» сохранён. Теперь отправьте Excel-файл <b>«ПОСЛЕ»</b>:", parse_mode="HTML")
+    await state.set_state(ReportFSM.waiting_for_mentor_file_after)
+
+@dp.message(ReportFSM.waiting_for_mentor_file_after, F.document)
+async def handle_mentor_file_after(message: Message, state: FSMContext):
+    file = await bot.get_file(message.document.file_id)
+    downloaded = await bot.download_file(file.file_path)
+    df_after = pd.read_excel(io.BytesIO(downloaded.read()))
+
+    session = user_sessions.setdefault(message.from_user.id, {})
+    df_before = session.get("df_before")
+    mentor_map = session.get("mentor_map", [])
+
+    await message.answer("Генерирую срез для наставников...")
+    try:
+        image_bytes, df_result = generate_mentor_report(mentor_map, df_before, df_after)
+        await message.answer_photo(
+            photo=BufferedInputFile(image_bytes.read(), filename="mentors_report.jpg"),
+            caption="🏆 Срез для наставников готов",
+            reply_markup=main_kb
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка генерации таблицы: {e}", reply_markup=main_kb)
+    finally:
+        await state.clear()
+
+def clean_num_val(val, default=0.0):
+    if pd.isnull(val):
+        return default
+    v = str(val).replace("%", "").replace(",", ".").replace(" ", "").strip()
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+def find_column(df, patterns):
+    for col in df.columns:
+        col_str = str(col).lower()
+        if any(p.lower() in col_str for p in patterns):
+            return col
+    return None
+
+def generate_mentor_report(mentor_map, df_before, df_after):
+    for df in [df_before, df_after]:
+        df.columns = [str(c).strip() for c in df.columns]
+
+    col_fio_b = find_column(df_before, ["фио", "сотрудник", "оператор"])
+    col_fio_a = find_column(df_after, ["фио", "сотрудник", "оператор"])
+    col_cat_b = find_column(df_before, ["категор"])
+    col_cat_a = find_column(df_after, ["категор"])
+    col_cr_b = find_column(df_before, ["% успешных", "конверс", "cr"])
+    col_cr_a = find_column(df_after, ["% успешных", "конверс", "cr"])
+    col_vsego_b = find_column(df_before, ["всего", "звонков"])
+    col_vsego_a = find_column(df_after, ["всего", "звонков"])
+    col_smen_b = find_column(df_before, ["смен"])
+    col_smen_a = find_column(df_after, ["смен"])
+    col_dozvon_b = find_column(df_before, ["дозвон"])
+    col_dozvon_a = find_column(df_after, ["дозвон"])
+    col_id = find_column(df_after, ["id", "айди"]) or find_column(df_before, ["id", "айди"])
+    col_zp_a = find_column(df_after, ["зп", "за период", "оплата"])
+
+    rows = []
+    for item in mentor_map:
+        mentor = item["mentor"]
+        op_query = item["op_query"].lower()
+
+        sub_a = df_after[df_after[col_fio_a].astype(str).str.lower().str.contains(op_query, na=False)] if col_fio_a else pd.DataFrame()
+        sub_b = df_before[df_before[col_fio_b].astype(str).str.lower().str.contains(op_query, na=False)] if col_fio_b else pd.DataFrame()
+
+        row_a = sub_a.iloc[0] if not sub_a.empty else None
+        row_b = sub_b.iloc[0] if not sub_b.empty else None
+
+        fio_op = ""
+        if row_a is not None:
+            fio_op = str(row_a[col_fio_a])
+        elif row_b is not None:
+            fio_op = str(row_b[col_fio_b])
+        else:
+            fio_op = item["op_query"]
+
+        id_val = ""
+        if col_id:
+            if row_a is not None and pd.notnull(row_a.get(col_id)):
+                id_val = str(row_a[col_id]).replace(".0", "")
+            elif row_b is not None and pd.notnull(row_b.get(col_id)):
+                id_val = str(row_b[col_id]).replace(".0", "")
+
+        cat_b = clean_num_val(row_b[col_cat_b], 4.0) if row_b is not None and col_cat_b else 4.0
+        cr_b = clean_num_val(row_b[col_cr_b], 0.0) if row_b is not None and col_cr_b else 0.0
+        if cr_b < 1.0 and cr_b > 0:
+            cr_b *= 100
+        vsego_b = clean_num_val(row_b[col_vsego_b], 0) if row_b is not None and col_vsego_b else 0
+        smen_b = clean_num_val(row_b[col_smen_b], 1) if row_b is not None and col_smen_b else 1
+        smen_b = 1 if smen_b <= 0 else smen_b
+        zv_smena_b = vsego_b / smen_b
+        dozvon_b = clean_num_val(row_b[col_dozvon_b], 0.0) if row_b is not None and col_dozvon_b else 0.0
+        if dozvon_b < 1.0 and dozvon_b > 0:
+            dozvon_b *= 100
+
+        cat_a = clean_num_val(row_a[col_cat_a], 4.0) if row_a is not None and col_cat_a else 4.0
+        cr_a = clean_num_val(row_a[col_cr_a], 0.0) if row_a is not None and col_cr_a else 0.0
+        if cr_a < 1.0 and cr_a > 0:
+            cr_a *= 100
+        vsego_a = clean_num_val(row_a[col_vsego_a], 0) if row_a is not None and col_vsego_a else 0
+        smen_a = clean_num_val(row_a[col_smen_a], 1) if row_a is not None and col_smen_a else 1
+        smen_a = 1 if smen_a <= 0 else smen_a
+        zv_smena_a = vsego_a / smen_a
+        dozvon_a = clean_num_val(row_a[col_dozvon_a], 0.0) if row_a is not None and col_dozvon_a else 0.0
+        if dozvon_a < 1.0 and dozvon_a > 0:
+            dozvon_a *= 100
+
+        zp_a = clean_num_val(row_a[col_zp_a], 0.0) if row_a is not None and col_zp_a else 0.0
+
+        # Расчет прироста: Категория ДО - Категория ПОСЛЕ
+        prirost = cat_b - cat_a
+        # Шаги по 0.5 (округление вниз)
+        steps_05 = math.floor(prirost / 0.5) if prirost > 0 else 0
+        payout_pct = steps_05 * 0.10
+
+        zp_ns_str = "-"
+        if payout_pct >= 0.10 and zp_a > 0:
+            zp_ns_str = f"{int(round(zp_a * payout_pct))}"
+
+        rows.append({
+            "ФИО НС": mentor,
+            "ID": id_val,
+            "ФИО Оператора": fio_op,
+            "Категория\nДО": f"{cat_b:.2f}".replace(".", ","),
+            "Конверсия\nДО": f"{cr_b:.2f}%".replace(".", ","),
+            "Звонков в\nсмену ДО": f"{int(round(zv_smena_b))}",
+            "% дозвона\nДО": f"{dozvon_b:.2f}%".replace(".", ","),
+            "Категория": f"{cat_a:.2f}".replace(".", ","),
+            "Конверсия": f"{cr_a:.2f}%".replace(".", ","),
+            "Звонков в\nсмену": f"{int(round(zv_smena_a))}",
+            "Прирост": f"{prirost:+.2f}".replace(".", ","),
+            "ЗП НС": zp_ns_str,
+            "Смен": f"{int(round(smen_a))}",
+            "% дозвона": f"{dozvon_a:.2f}%".replace(".", ","),
+        })
+
+    res_df = pd.DataFrame(rows)
+
+    fig, ax = plt.subplots(figsize=(24, len(res_df) * 0.52 + 1.8))
+    ax.axis("off")
+
+    col_widths = [0.12, 0.05, 0.22, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.05, 0.04, 0.06]
+    table = ax.table(
+        cellText=res_df.values,
+        colLabels=res_df.columns,
+        loc="center",
+        cellLoc="center",
+        colWidths=col_widths,
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10.5)
+    table.scale(1.15, 2.3)
+
+    # Цветовое зонирование шапки как на скриншоте:
+    blue_cols = [0, 1, 2]         # ФИО НС, ID, ФИО Оператора
+    teal_cols = [3, 4, 5, 6]      # Блок "ДО"
+    purple_cols = [7, 8, 9, 10, 11, 12, 13]  # Блок "ПОСЛЕ" / НС
+
+    for c_idx in range(len(res_df.columns)):
+        cell = table[(0, c_idx)]
+        cell.get_text().set_weight("bold")
+        if c_idx in blue_cols:
+            cell.set_facecolor("#2b6cb0")
+            cell.get_text().set_color("white")
+        elif c_idx in teal_cols:
+            cell.set_facecolor("#1f6f78")
+            cell.get_text().set_color("white")
+        elif c_idx in purple_cols:
+            cell.set_facecolor("#dcd6e8")
+            cell.get_text().set_color("black")
+
+    for r_idx in range(len(res_df)):
+        table[(r_idx + 1, 0)].get_text().set_horizontalalignment("left")
+        table[(r_idx + 1, 2)].get_text().set_horizontalalignment("left")
+        for c_idx in range(len(res_df.columns)):
+            table[(r_idx + 1, c_idx)].set_edgecolor("#cccccc")
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="jpeg", bbox_inches="tight", dpi=250)
+    buf.seek(0)
+    plt.close()
+    return buf, res_df
+
+# ==================== СТАНДАРТНЫЕ ОТЧЕТЫ ====================
 @dp.message(F.text.in_([
     "Срез для группы",
     "Срез для админки",
@@ -385,7 +620,6 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
         image_bytes = render_dataframe_to_image(df_target, gp_avg_val, real_avg_usp, real_avg_dozvon)
         image_data = image_bytes.getvalue()
 
-        # Формируем тело поста в зависимости от выбранного шаблона (1..6)
         group_post_text = build_group_message_text(template_body, df_target_full, selected_template, gp_avg_text)
 
         post_key = f"{message.chat.id}_{target_group}"
@@ -396,7 +630,6 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
         )
 
         if is_group_only:
-            # Обход лимита 1024 символа для Caption
             if len(group_post_text) <= 1000:
                 await message.answer_photo(
                     photo=BufferedInputFile(image_data, filename="group_slice.jpg"),
@@ -446,11 +679,9 @@ def get_tag_for_fio(fio, tags_dict):
 def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str, gp_avg_text: str) -> str:
     tags_dict = get_tags_map()
 
-    # Сообщение 5: без тегов
     if tmpl_num == "5":
         return f"{template_body}\n\nКонва по ГП: <b>{gp_avg_text}%</b>"
 
-    # Сообщение 6: Звездочки по успешкам (лидеры)
     if tmpl_num == "6":
         df_valid = df.copy()
         df_valid = df_valid[~df_valid["ФИО"].astype(str).str.upper().str.contains("СРЕДНЕЕ|ИТОГО")]
@@ -470,7 +701,6 @@ def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str
         stars_block = "\n".join(top_lines) if top_lines else "Пока нет успешных"
         return f"🏆 <b>{template_body}</b>\n\nКонва по ГП: <b>{gp_avg_text}%</b>\n\n<b>Лидеры смены:</b>\n{stars_block}"
 
-    # Сообщения 1, 2, 3, 4: прикрепляем всех участников из среза
     all_tags = []
     for _, row in df.iterrows():
         fio_raw = str(row.get("ФИО", "")).strip()
