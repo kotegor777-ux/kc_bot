@@ -3,12 +3,14 @@ import os
 import json
 import math
 import asyncio
+from typing import Callable, Dict, Any, Awaitable
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.types import (
     Message,
+    TelegramObject,
     ReplyKeyboardMarkup,
     KeyboardButton,
     InlineKeyboardMarkup,
@@ -23,8 +25,31 @@ from aiogram.filters import CommandStart
 BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
 TARGET_TELEGRAM_GROUP_ID = -1000000000000
 
+# Список ID администраторов, имеющих доступ к боту
+ADMIN_IDS = [294001568, 210925919]
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Middleware для проверки прав доступа
+class AdminAccessMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        user = data.get("event_from_user")
+        if user and user.id not in ADMIN_IDS:
+            if isinstance(event, Message):
+                await event.answer("⛔ У вас нет доступа к этому боту.")
+            elif isinstance(event, CallbackQuery):
+                await event.answer("⛔ У вас нет доступа к этому боту.", show_alert=True)
+            return
+        return await handler(event, data)
+
+dp.message.outer_middleware(AdminAccessMiddleware())
+dp.callback_query.outer_middleware(AdminAccessMiddleware())
 
 TEMPLATES_FILE = "templates.json"
 
@@ -99,7 +124,7 @@ class ReportFSM(StatesGroup):
     waiting_for_gp_average = State()
     waiting_for_tags_file = State()
     waiting_for_template_text = State()
-    # FSM для среза наставников
+    # Ветка для среза наставников
     waiting_for_mentor_mappings = State()
     waiting_for_mentor_file_before = State()
     waiting_for_mentor_file_after = State()
@@ -339,33 +364,31 @@ def generate_mentor_report(mentor_map, df_before, df_after):
 
         cat_b = clean_num_val(row_b[col_cat_b], 4.0) if row_b is not None and col_cat_b else 4.0
         cr_b = clean_num_val(row_b[col_cr_b], 0.0) if row_b is not None and col_cr_b else 0.0
-        if cr_b < 1.0 and cr_b > 0:
+        if 0 < cr_b < 1.0:
             cr_b *= 100
         vsego_b = clean_num_val(row_b[col_vsego_b], 0) if row_b is not None and col_vsego_b else 0
         smen_b = clean_num_val(row_b[col_smen_b], 1) if row_b is not None and col_smen_b else 1
         smen_b = 1 if smen_b <= 0 else smen_b
         zv_smena_b = vsego_b / smen_b
         dozvon_b = clean_num_val(row_b[col_dozvon_b], 0.0) if row_b is not None and col_dozvon_b else 0.0
-        if dozvon_b < 1.0 and dozvon_b > 0:
+        if 0 < dozvon_b < 1.0:
             dozvon_b *= 100
 
         cat_a = clean_num_val(row_a[col_cat_a], 4.0) if row_a is not None and col_cat_a else 4.0
         cr_a = clean_num_val(row_a[col_cr_a], 0.0) if row_a is not None and col_cr_a else 0.0
-        if cr_a < 1.0 and cr_a > 0:
+        if 0 < cr_a < 1.0:
             cr_a *= 100
         vsego_a = clean_num_val(row_a[col_vsego_a], 0) if row_a is not None and col_vsego_a else 0
         smen_a = clean_num_val(row_a[col_smen_a], 1) if row_a is not None and col_smen_a else 1
         smen_a = 1 if smen_a <= 0 else smen_a
         zv_smena_a = vsego_a / smen_a
         dozvon_a = clean_num_val(row_a[col_dozvon_a], 0.0) if row_a is not None and col_dozvon_a else 0.0
-        if dozvon_a < 1.0 and dozvon_a > 0:
+        if 0 < dozvon_a < 1.0:
             dozvon_a *= 100
 
         zp_a = clean_num_val(row_a[col_zp_a], 0.0) if row_a is not None and col_zp_a else 0.0
 
-        # Расчет прироста: Категория ДО - Категория ПОСЛЕ
         prirost = cat_b - cat_a
-        # Шаги по 0.5 (округление вниз)
         steps_05 = math.floor(prirost / 0.5) if prirost > 0 else 0
         payout_pct = steps_05 * 0.10
 
@@ -407,10 +430,9 @@ def generate_mentor_report(mentor_map, df_before, df_after):
     table.set_fontsize(10.5)
     table.scale(1.15, 2.3)
 
-    # Цветовое зонирование шапки как на скриншоте:
-    blue_cols = [0, 1, 2]         # ФИО НС, ID, ФИО Оператора
-    teal_cols = [3, 4, 5, 6]      # Блок "ДО"
-    purple_cols = [7, 8, 9, 10, 11, 12, 13]  # Блок "ПОСЛЕ" / НС
+    blue_cols = [0, 1, 2]
+    teal_cols = [3, 4, 5, 6]
+    purple_cols = [7, 8, 9, 10, 11, 12, 13]
 
     for c_idx in range(len(res_df.columns)):
         cell = table[(0, c_idx)]
