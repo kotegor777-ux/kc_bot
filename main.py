@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import json
 import math
 import asyncio
@@ -26,12 +27,12 @@ BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
 TARGET_TELEGRAM_GROUP_ID = -1000000000000
 
 # Список ID администраторов, имеющих доступ к боту
-ADMIN_IDS = [294001568, 210925919, 860289743]
+ADMIN_IDS = [294001568, 210925919]
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Middleware для проверки прав доступа
+# Middleware проверки прав доступа
 class AdminAccessMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -106,13 +107,14 @@ def save_templates(templates):
     with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
         json.dump(templates, f, ensure_ascii=False, indent=2)
 
+# Кнопка «Отчет в группу 2ч» убрана
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Срез для группы"), KeyboardButton(text="Срез для админки")],
-        [KeyboardButton(text="Срез для наставников"), KeyboardButton(text="Сравнительный по ГП")],
-        [KeyboardButton(text="Отчет в группу 2ч"), KeyboardButton(text="Сравнительный по ГП неделя")],
-        [KeyboardButton(text="Отчет в группу неделя"), KeyboardButton(text="Анализ группы")],
-        [KeyboardButton(text="Загрузить базу тегов"), KeyboardButton(text="⚙️ Редактировать шаблоны")],
+        [KeyboardButton(text="Срез для наставников"), KeyboardButton(text="Анализ группы")],
+        [KeyboardButton(text="Сравнительный по ГП"), KeyboardButton(text="Сравнительный по ГП неделя")],
+        [KeyboardButton(text="Отчет в группу неделя"), KeyboardButton(text="Загрузить базу тегов")],
+        [KeyboardButton(text="⚙️ Редактировать шаблоны")]
     ],
     resize_keyboard=True,
 )
@@ -130,6 +132,62 @@ class ReportFSM(StatesGroup):
 
 user_sessions = {}
 cached_group_posts = {}
+
+# ==================== УМНЫЙ МАТЧИНГ ТЕГОВ ====================
+def clean_fio_string(text: str) -> str:
+    if not text or pd.isnull(text):
+        return ""
+    s = str(text)
+    # Убираем всё внутри скобок и сами скобки (КЦ УД 47, СЗ ..., и т.д.)
+    s = re.sub(r"\(.*?\)", "", s)
+    # Убираем постфиксы ролей (У, ОБ, НС и т.д.)
+    s = re.sub(r"\b(У|ОБ|НС|СВ)\b", "", s, flags=re.IGNORECASE)
+    # Убираем лишние символы и нормализуем пробелы
+    s = re.sub(r"[^а-яА-ЯёЁa-zA-Z\s]", " ", s)
+    return " ".join(s.split()).strip()
+
+def get_tags_map() -> dict:
+    if os.path.exists("tags.json"):
+        try:
+            with open("tags.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def get_tag_for_fio(fio_raw: str, tags_dict: dict) -> str:
+    cleaned = clean_fio_string(fio_raw)
+    if not cleaned:
+        return ""
+
+    tokens = cleaned.lower().split()
+    cleaned_lower = cleaned.lower()
+
+    # 1. Прямое точное совпадение
+    for db_fio, tag in tags_dict.items():
+        if clean_fio_string(db_fio).lower() == cleaned_lower:
+            return tag.strip() if tag and str(tag).lower() != "nan" else cleaned
+
+    # 2. Совпадение по Фамилии + Имени (первые 2 токена)
+    if len(tokens) >= 2:
+        fi = f"{tokens[0]} {tokens[1]}"
+        for db_fio, tag in tags_dict.items():
+            db_tokens = clean_fio_string(db_fio).lower().split()
+            if len(db_tokens) >= 2 and f"{db_tokens[0]} {db_tokens[1]}" == fi:
+                return tag.strip() if tag and str(tag).lower() != "nan" else cleaned
+
+    # 3. Совпадение по Фамилии (если фамилия уникальна в базе)
+    if tokens:
+        last_name = tokens[0]
+        matches = [
+            tag.strip() for db_fio, tag in tags_dict.items()
+            if clean_fio_string(db_fio).lower().startswith(last_name) and tag and str(tag).lower() != "nan"
+        ]
+        if len(matches) == 1:
+            return matches[0]
+
+    # 4. Если тег не найден — отдаём читаемое ФИО без CRM-мусора (до 2 слов: Фамилия Имя)
+    return " ".join(cleaned.split()[:2])
 
 def split_text(text: str, limit: int = 4000):
     parts = []
@@ -225,7 +283,7 @@ async def process_tags_file(message: Message, state: FSMContext):
         with open("tags.json", "w", encoding="utf-8") as f:
             json.dump(tags_dict, f, ensure_ascii=False, indent=2)
 
-        await message.answer(f"✅ База тегов обновлена! Загружено: {len(tags_dict)}", reply_markup=main_kb)
+        await message.answer(f"✅ База тегов обновлена! Загружено контактов: {len(tags_dict)}", reply_markup=main_kb)
     except Exception as e:
         await message.answer(f"❌ Ошибка при чтении файла: {e}")
     finally:
@@ -464,7 +522,6 @@ def generate_mentor_report(mentor_map, df_before, df_after):
 @dp.message(F.text.in_([
     "Срез для группы",
     "Срез для админки",
-    "Отчет в группу 2ч",
     "Сравнительный по ГП",
     "Отчет в группу неделя",
     "Сравнительный по ГП неделя",
@@ -622,7 +679,6 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
 
         admin_report_text = generate_admin_text(df_all, shtat, smena, gp_avg_text, real_avg_usp, real_avg_dozvon, target_group)
 
-        # Базовые колонки для среза группы
         columns_to_keep = [
             "ФИО",
             "Рабочее время",
@@ -683,25 +739,6 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
 
     await state.clear()
 
-def get_tags_map():
-    tags_dict = {}
-    if os.path.exists("tags.json"):
-        try:
-            with open("tags.json", "r", encoding="utf-8") as f:
-                tags_dict = json.load(f)
-        except Exception:
-            pass
-    return tags_dict
-
-def get_tag_for_fio(fio, tags_dict):
-    fio_clean = str(fio).strip()
-    if fio_clean in tags_dict and tags_dict[fio_clean]:
-        return tags_dict[fio_clean]
-    for key, tag in tags_dict.items():
-        if key.lower() in fio_clean.lower() and tag:
-            return tag
-    return fio_clean.split("(")[0].strip()
-
 def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str, gp_avg_text: str) -> str:
     tags_dict = get_tags_map()
 
@@ -732,7 +769,9 @@ def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str
         fio_raw = str(row.get("ФИО", "")).strip()
         if not fio_raw or fio_raw.upper() in ["СРЕДНЕЕ", "ИТОГО", "NAN"]:
             continue
-        all_tags.append(get_tag_for_fio(fio_raw, tags_dict))
+        tag = get_tag_for_fio(fio_raw, tags_dict)
+        if tag and tag not in all_tags:
+            all_tags.append(tag)
 
     tags_joined = " ".join(all_tags)
     return f"{template_body}\n\nКонва по ГП: <b>{gp_avg_text}%</b>\n\n👥 {tags_joined}"
