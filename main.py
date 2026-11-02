@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import html
 import json
 import math
 import asyncio
@@ -26,7 +27,7 @@ from aiogram.filters import CommandStart
 BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
 TARGET_TELEGRAM_GROUP_ID = -1000000000000
 
-# Список ID администраторов, имеющих доступ к боту
+# Список ID администраторов с доступом к боту
 ADMIN_IDS = [294001568, 210925919]
 
 bot = Bot(token=BOT_TOKEN)
@@ -96,7 +97,7 @@ DEFAULT_TEMPLATES = {
 def load_templates():
     if os.path.exists(TEMPLATES_FILE):
         try:
-            with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
+            with open(TEMPLATES_FILE, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
                 return {**DEFAULT_TEMPLATES, **data}
         except Exception:
@@ -107,7 +108,6 @@ def save_templates(templates):
     with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
         json.dump(templates, f, ensure_ascii=False, indent=2)
 
-# Кнопка «Отчет в группу 2ч» убрана
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Срез для группы"), KeyboardButton(text="Срез для админки")],
@@ -138,18 +138,15 @@ def clean_fio_string(text: str) -> str:
     if not text or pd.isnull(text):
         return ""
     s = str(text)
-    # Убираем всё внутри скобок и сами скобки (КЦ УД 47, СЗ ..., и т.д.)
     s = re.sub(r"\(.*?\)", "", s)
-    # Убираем постфиксы ролей (У, ОБ, НС и т.д.)
     s = re.sub(r"\b(У|ОБ|НС|СВ)\b", "", s, flags=re.IGNORECASE)
-    # Убираем лишние символы и нормализуем пробелы
     s = re.sub(r"[^а-яА-ЯёЁa-zA-Z\s]", " ", s)
     return " ".join(s.split()).strip()
 
 def get_tags_map() -> dict:
     if os.path.exists("tags.json"):
         try:
-            with open("tags.json", "r", encoding="utf-8") as f:
+            with open("tags.json", "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception:
             pass
@@ -163,12 +160,10 @@ def get_tag_for_fio(fio_raw: str, tags_dict: dict) -> str:
     tokens = cleaned.lower().split()
     cleaned_lower = cleaned.lower()
 
-    # 1. Прямое точное совпадение
     for db_fio, tag in tags_dict.items():
         if clean_fio_string(db_fio).lower() == cleaned_lower:
             return tag.strip() if tag and str(tag).lower() != "nan" else cleaned
 
-    # 2. Совпадение по Фамилии + Имени (первые 2 токена)
     if len(tokens) >= 2:
         fi = f"{tokens[0]} {tokens[1]}"
         for db_fio, tag in tags_dict.items():
@@ -176,7 +171,6 @@ def get_tag_for_fio(fio_raw: str, tags_dict: dict) -> str:
             if len(db_tokens) >= 2 and f"{db_tokens[0]} {db_tokens[1]}" == fi:
                 return tag.strip() if tag and str(tag).lower() != "nan" else cleaned
 
-    # 3. Совпадение по Фамилии (если фамилия уникальна в базе)
     if tokens:
         last_name = tokens[0]
         matches = [
@@ -186,7 +180,6 @@ def get_tag_for_fio(fio_raw: str, tags_dict: dict) -> str:
         if len(matches) == 1:
             return matches[0]
 
-    # 4. Если тег не найден — отдаём читаемое ФИО без CRM-мусора (до 2 слов: Фамилия Имя)
     return " ".join(cleaned.split()[:2])
 
 def split_text(text: str, limit: int = 4000):
@@ -242,7 +235,7 @@ async def callback_edit_template(call: CallbackQuery, state: FSMContext):
 
     await call.message.answer(
         f"Текущий текст для <b>Сообщения {msg_num}</b>:\n\n"
-        f"<i>{current_text}</i>\n\n"
+        f"{current_text}\n\n"
         "Отправьте в ответ новый текст сообщения:",
         parse_mode="HTML"
     )
@@ -255,9 +248,15 @@ async def process_new_template_text(message: Message, state: FSMContext):
 
     if msg_num:
         templates = load_templates()
-        templates[msg_num] = message.text.strip()
+        new_text = message.html_text.strip() if hasattr(message, "html_text") and message.html_text else message.text.strip()
+        templates[msg_num] = new_text
         save_templates(templates)
-        await message.answer(f"✅ Текст для <b>Сообщения {msg_num}</b> успешно сохранен!", parse_mode="HTML", reply_markup=main_kb)
+
+        await message.answer(
+            f"✅ Текст для <b>Сообщения {msg_num}</b> успешно сохранен!\n\n{new_text}",
+            parse_mode="HTML",
+            reply_markup=main_kb
+        )
 
     await state.clear()
 
