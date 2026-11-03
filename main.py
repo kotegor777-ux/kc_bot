@@ -24,23 +24,17 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
-BOT_TOKEN = "8706677874:AAFslqcEmnyry5u6ZHmMBLYHe_kfAAOInp4"
+BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
 TARGET_TELEGRAM_GROUP_ID = -1005538702799
 
-# Список ID администраторов и доверенной группы
-ADMIN_IDS = [
-    294001568,
-    210925919,
-    5538702799,
-    -5538702799,
-    -1005538702799,
-]
+# Список ID администраторов с доступом к управлению ботом
+ADMIN_IDS = [294001568, 210925919]
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Middleware проверки прав доступа (по user.id и chat.id)
-class AdminAccessMiddleware(BaseMiddleware):
+# Middleware: запрещает работу в общих группах и блокирует не-администраторов
+class AdminPrivateOnlyMiddleware(BaseMiddleware):
     async def __call__(
         self,
         handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
@@ -50,10 +44,12 @@ class AdminAccessMiddleware(BaseMiddleware):
         user = data.get("event_from_user")
         chat = data.get("event_chat")
 
-        is_user_allowed = user and user.id in ADMIN_IDS
-        is_chat_allowed = chat and chat.id in ADMIN_IDS
+        # Если событие произошло внутри группы/супергруппы — бот его полностью игнорирует
+        if chat and chat.type in ["group", "supergroup"]:
+            return
 
-        if not (is_user_allowed or is_chat_allowed):
+        # В личных сообщениях проверяем, входит ли пользователь в список администраторов
+        if not user or user.id not in ADMIN_IDS:
             if isinstance(event, Message):
                 await event.answer("⛔ У вас нет доступа к этому боту.")
             elif isinstance(event, CallbackQuery):
@@ -62,8 +58,8 @@ class AdminAccessMiddleware(BaseMiddleware):
 
         return await handler(event, data)
 
-dp.message.outer_middleware(AdminAccessMiddleware())
-dp.callback_query.outer_middleware(AdminAccessMiddleware())
+dp.message.outer_middleware(AdminPrivateOnlyMiddleware())
+dp.callback_query.outer_middleware(AdminPrivateOnlyMiddleware())
 
 TEMPLATES_FILE = "templates.json"
 
