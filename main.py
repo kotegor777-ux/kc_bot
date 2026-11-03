@@ -25,15 +25,20 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
 BOT_TOKEN = "8706677874:AAHCELGsaHKGU52inrRYx9YOX9MdLG_660A"
-TARGET_TELEGRAM_GROUP_ID = -1005538702799
+TARGET_TELEGRAM_GROUP_ID = -1003826229666
 
-# Список ID администраторов с доступом к управлению ботом
-ADMIN_IDS = [294001568, 210925919]
+# Список ID администраторов и целевой группы
+ADMIN_IDS = [
+    294001568,
+    210925919,
+    860289743,
+    -1003826229666,
+]
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Middleware: запрещает работу в общих группах и блокирует не-администраторов
+# Middleware: блокирует работу в группах и не пускает не-администраторов
 class AdminPrivateOnlyMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -44,11 +49,11 @@ class AdminPrivateOnlyMiddleware(BaseMiddleware):
         user = data.get("event_from_user")
         chat = data.get("event_chat")
 
-        # Если событие произошло внутри группы/супергруппы — бот его полностью игнорирует
+        # В группах/супергруппах бот полностью игнорирует сообщения
         if chat and chat.type in ["group", "supergroup"]:
             return
 
-        # В личных сообщениях проверяем, входит ли пользователь в список администраторов
+        # В личке проверяем права администратора
         if not user or user.id not in ADMIN_IDS:
             if isinstance(event, Message):
                 await event.answer("⛔ У вас нет доступа к этому боту.")
@@ -785,17 +790,18 @@ def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str
 
 @dp.callback_query(F.data.startswith("send_group:"))
 async def callback_send_to_group(call: CallbackQuery):
+    await call.answer("Отправка в группу...")
     post_key = call.data.split("send_group:")[1]
     post_data = cached_group_posts.get(post_key)
 
     if not post_data:
-        await call.answer("Данные среза устарели. Сформируйте отчет заново.", show_alert=True)
+        await call.message.answer("⚠️ Данные среза устарели в памяти. Сгенерируйте срез заново.")
         return
 
-    try:
-        text = post_data["text"]
-        img = post_data["img"]
+    text = post_data["text"]
+    img = post_data["img"]
 
+    try:
         if len(text) <= 1000:
             await bot.send_photo(
                 chat_id=TARGET_TELEGRAM_GROUP_ID,
@@ -809,11 +815,16 @@ async def callback_send_to_group(call: CallbackQuery):
                 photo=BufferedInputFile(img, filename="report.jpg"),
             )
             for chunk in split_text(text):
-                await bot.send_message(chat_id=TARGET_TELEGRAM_GROUP_ID, text=chunk, parse_mode="HTML")
+                await bot.send_message(
+                    chat_id=TARGET_TELEGRAM_GROUP_ID,
+                    text=chunk,
+                    parse_mode="HTML"
+                )
 
-        await call.answer("✅ Успешно отправлено в группу!", show_alert=True)
+        await call.message.answer("✅ Успешно опубликовано в группе!")
     except Exception as e:
-        await call.answer(f"❌ Ошибка отправки: {e}", show_alert=True)
+        error_msg = f"❌ Ошибка отправки в группу:\n<code>{html.escape(str(e))}</code>\n\nПроверьте права бота в группе {TARGET_TELEGRAM_GROUP_ID}."
+        await call.message.answer(error_msg, parse_mode="HTML")
 
 def generate_analysis_text(df, gp_avg, target_group):
     if df.empty:
