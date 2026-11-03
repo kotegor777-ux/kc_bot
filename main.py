@@ -49,7 +49,7 @@ class AdminPrivateOnlyMiddleware(BaseMiddleware):
         user = data.get("event_from_user")
         chat = data.get("event_chat")
 
-        # В группах/супергруппах бот полностью игнорирует сообщения
+        # В группах/супергруппах бот полностью игнорирует входящие сообщения участников
         if chat and chat.type in ["group", "supergroup"]:
             return
 
@@ -714,6 +714,7 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
         image_bytes = render_dataframe_to_image(df_target, gp_avg_val, real_avg_usp, real_avg_dozvon)
         image_data = image_bytes.getvalue()
 
+        # Строим компактный текст, строго умещающийся в caption под фото (до 1024 символов)
         group_post_text = build_group_message_text(template_body, df_target_full, selected_template, gp_avg_text)
 
         post_key = f"{message.chat.id}_{target_group}"
@@ -724,21 +725,13 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
         )
 
         if report_type == "Срез для группы":
-            if len(group_post_text) <= 1000:
-                await message.answer_photo(
-                    photo=BufferedInputFile(image_data, filename="group_slice.jpg"),
-                    caption=group_post_text,
-                    parse_mode="HTML",
-                    reply_markup=send_markup,
-                )
-            else:
-                await message.answer_photo(
-                    photo=BufferedInputFile(image_data, filename="group_slice.jpg"),
-                    caption=f"📊 <b>Срез по группе {target_group}</b>",
-                    parse_mode="HTML",
-                )
-                for chunk in split_text(group_post_text):
-                    await message.answer(chunk, parse_mode="HTML", reply_markup=send_markup)
+            # Всегда отправляем единым сообщением: картинка + подпись под ней
+            await message.answer_photo(
+                photo=BufferedInputFile(image_data, filename="group_slice.jpg"),
+                caption=group_post_text,
+                parse_mode="HTML",
+                reply_markup=send_markup,
+            )
         else:
             for chunk in split_text(admin_report_text):
                 await message.answer(chunk, parse_mode="HTML")
@@ -754,8 +747,11 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
 def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str, gp_avg_text: str) -> str:
     tags_dict = get_tags_map()
 
+    # Базовая часть сообщения (шаблон + конва по ГП)
+    base_text = f"{template_body}\n\nКонва по ГП: <b>{gp_avg_text}%</b>"
+
     if tmpl_num == "5":
-        return f"{template_body}\n\nКонва по ГП: <b>{gp_avg_text}%</b>"
+        return base_text
 
     if tmpl_num == "6":
         df_valid = df.copy()
@@ -771,11 +767,12 @@ def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str
                 continue
             icon = medals[i] if i < len(medals) else "🔸"
             tag = get_tag_for_fio(row.get("ФИО", ""), tags_dict)
-            top_lines.append(f"{icon} {tag} — <b>{usp_val}</b> успешных")
+            top_lines.append(f"{icon} {tag} — <b>{usp_val}</b>")
 
         stars_block = "\n".join(top_lines) if top_lines else "Пока нет успешных"
         return f"🏆 <b>{template_body}</b>\n\nКонва по ГП: <b>{gp_avg_text}%</b>\n\n<b>Лидеры смены:</b>\n{stars_block}"
 
+    # Для шаблонов 1, 2, 3, 4: собираем теги операторов
     all_tags = []
     for _, row in df.iterrows():
         fio_raw = str(row.get("ФИО", "")).strip()
@@ -785,8 +782,26 @@ def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str
         if tag and tag not in all_tags:
             all_tags.append(tag)
 
-    tags_joined = " ".join(all_tags)
-    return f"{template_body}\n\nКонва по ГП: <b>{gp_avg_text}%</b>\n\n👥 {tags_joined}"
+    # Гарантируем, что подпись не превысит лимит Telegram в 1024 символа
+    header_prefix = "\n\n👥 "
+    max_caption_len = 1010
+    allowed_for_tags = max_caption_len - len(base_text) - len(header_prefix)
+
+    fitted_tags = []
+    curr_len = 0
+    for t in all_tags:
+        # длина тега + 1 символ пробела
+        if curr_len + len(t) + 1 <= allowed_for_tags:
+            fitted_tags.append(t)
+            curr_len += len(t) + 1
+        else:
+            break
+
+    if fitted_tags:
+        tags_str = " ".join(fitted_tags)
+        return f"{base_text}{header_prefix}{tags_str}"
+    
+    return base_text
 
 @dp.callback_query(F.data.startswith("send_group:"))
 async def callback_send_to_group(call: CallbackQuery):
@@ -802,26 +817,14 @@ async def callback_send_to_group(call: CallbackQuery):
     img = post_data["img"]
 
     try:
-        if len(text) <= 1000:
-            await bot.send_photo(
-                chat_id=TARGET_TELEGRAM_GROUP_ID,
-                photo=BufferedInputFile(img, filename="report.jpg"),
-                caption=text,
-                parse_mode="HTML",
-            )
-        else:
-            await bot.send_photo(
-                chat_id=TARGET_TELEGRAM_GROUP_ID,
-                photo=BufferedInputFile(img, filename="report.jpg"),
-            )
-            for chunk in split_text(text):
-                await bot.send_message(
-                    chat_id=TARGET_TELEGRAM_GROUP_ID,
-                    text=chunk,
-                    parse_mode="HTML"
-                )
-
-        await call.message.answer("✅ Успешно опубликовано в группе!")
+        # Всегда отправляем строго одним сообщением (подпись под фото)
+        await bot.send_photo(
+            chat_id=TARGET_TELEGRAM_GROUP_ID,
+            photo=BufferedInputFile(img, filename="report.jpg"),
+            caption=text,
+            parse_mode="HTML",
+        )
+        await call.message.answer("✅ Успешно опубликовано в группе единым сообщением под фото!")
     except Exception as e:
         error_msg = f"❌ Ошибка отправки в группу:\n<code>{html.escape(str(e))}</code>\n\nПроверьте права бота в группе {TARGET_TELEGRAM_GROUP_ID}."
         await call.message.answer(error_msg, parse_mode="HTML")
