@@ -1135,10 +1135,10 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
                     bg_color = get_usp_color(row_usp_val)
                 elif col == "Рабочее время":
                     sec = parse_time_seconds(val)
-                    bg_color = "#77c38d" if sec >= 4 * 3600 else "#ffffff"
+                    bg_color = "#77c38d" if sec >= 4 * 3600 else "#f4cccc"
                 elif col == "Время перерывов":
                     sec = parse_time_seconds(val)
-                    bg_color = "#f4cccc" if sec >= 2 * 3600 else "#ffffff"
+                    bg_color = "#77c38d" if sec < 2 * 3600 else "#f4cccc"
                 elif col == "Категория":
                     bg_color = "#ffffff"
                 elif col in pct_cols + numeric_cols and col in norm_dict:
