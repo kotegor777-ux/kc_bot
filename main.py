@@ -25,7 +25,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
 BOT_TOKEN = "8706677874:AAFslqcEmnyry5u6ZHmMBLYHe_kfAAOInp4"
-TARGET_TELEGRAM_GROUP_ID = -1003826229666
+TARGET_TELEGRAM_GROUP_ID = -1004382894214
 
 # Список ID администраторов и целевой группы
 ADMIN_IDS = [
