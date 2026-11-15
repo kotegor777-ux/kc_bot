@@ -714,7 +714,6 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
         image_bytes = render_dataframe_to_image(df_target, gp_avg_val, real_avg_usp, real_avg_dozvon)
         image_data = image_bytes.getvalue()
 
-        # Строим компактный текст, строго умещающийся в caption под фото (до 1024 символов)
         group_post_text = build_group_message_text(template_body, df_target_full, selected_template, gp_avg_text)
 
         post_key = f"{message.chat.id}_{target_group}"
@@ -725,7 +724,6 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
         )
 
         if report_type == "Срез для группы":
-            # Всегда отправляем единым сообщением: картинка + подпись под ней
             await message.answer_photo(
                 photo=BufferedInputFile(image_data, filename="group_slice.jpg"),
                 caption=group_post_text,
@@ -746,8 +744,6 @@ async def process_report(message: Message, state: FSMContext, session: dict, sel
 
 def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str, gp_avg_text: str) -> str:
     tags_dict = get_tags_map()
-
-    # Базовая часть сообщения (шаблон + конва по ГП)
     base_text = f"{template_body}\n\nКонва по ГП: <b>{gp_avg_text}%</b>"
 
     if tmpl_num == "5":
@@ -772,7 +768,6 @@ def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str
         stars_block = "\n".join(top_lines) if top_lines else "Пока нет успешных"
         return f"🏆 <b>{template_body}</b>\n\nКонва по ГП: <b>{gp_avg_text}%</b>\n\n<b>Лидеры смены:</b>\n{stars_block}"
 
-    # Для шаблонов 1, 2, 3, 4: собираем теги операторов
     all_tags = []
     for _, row in df.iterrows():
         fio_raw = str(row.get("ФИО", "")).strip()
@@ -782,7 +777,6 @@ def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str
         if tag and tag not in all_tags:
             all_tags.append(tag)
 
-    # Гарантируем, что подпись не превысит лимит Telegram в 1024 символа
     header_prefix = "\n\n👥 "
     max_caption_len = 1010
     allowed_for_tags = max_caption_len - len(base_text) - len(header_prefix)
@@ -790,7 +784,6 @@ def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str
     fitted_tags = []
     curr_len = 0
     for t in all_tags:
-        # длина тега + 1 символ пробела
         if curr_len + len(t) + 1 <= allowed_for_tags:
             fitted_tags.append(t)
             curr_len += len(t) + 1
@@ -800,7 +793,7 @@ def build_group_message_text(template_body: str, df: pd.DataFrame, tmpl_num: str
     if fitted_tags:
         tags_str = " ".join(fitted_tags)
         return f"{base_text}{header_prefix}{tags_str}"
-    
+
     return base_text
 
 @dp.callback_query(F.data.startswith("send_group:"))
@@ -817,7 +810,6 @@ async def callback_send_to_group(call: CallbackQuery):
     img = post_data["img"]
 
     try:
-        # Всегда отправляем строго одним сообщением (подпись под фото)
         await bot.send_photo(
             chat_id=TARGET_TELEGRAM_GROUP_ID,
             photo=BufferedInputFile(img, filename="report.jpg"),
@@ -1015,6 +1007,28 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
 
     display_df = df.copy()
 
+    def parse_time_seconds(val):
+        if pd.isnull(val):
+            return 0
+        v = str(val).strip()
+        try:
+            if v.startswith("1900-01-"):
+                d_str, t_str = v.split(" ")
+                days = int(d_str.split("-")[2])
+                h, m, s = map(float, t_str.split(":"))
+                return days * 24 * 3600 + h * 3600 + m * 60 + s
+            elif "day" in v:
+                parts = v.split(" ")
+                days = int(parts[0])
+                h, m, s = map(float, parts[-1].split(":"))
+                return days * 24 * 3600 + h * 3600 + m * 60 + s
+            parts = v.split(":")
+            if len(parts) >= 3:
+                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        except Exception:
+            pass
+        return 0
+
     def fix_time_format(val):
         if pd.isnull(val):
             return ""
@@ -1119,7 +1133,13 @@ def render_dataframe_to_image(df_original, gp_avg=0.0, real_avg_usp=None, real_a
 
                 if col == "ФИО" or col == usp_col:
                     bg_color = get_usp_color(row_usp_val)
-                elif col in ["Рабочее время", "Время перерывов", "Категория"]:
+                elif col == "Рабочее время":
+                    sec = parse_time_seconds(val)
+                    bg_color = "#77c38d" if sec >= 4 * 3600 else "#ffffff"
+                elif col == "Время перерывов":
+                    sec = parse_time_seconds(val)
+                    bg_color = "#f4cccc" if sec >= 2 * 3600 else "#ffffff"
+                elif col == "Категория":
                     bg_color = "#ffffff"
                 elif col in pct_cols + numeric_cols and col in norm_dict:
                     v_num = pd.to_numeric(val, errors="coerce")
