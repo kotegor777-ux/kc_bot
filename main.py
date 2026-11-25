@@ -25,14 +25,14 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
 BOT_TOKEN = "8706677874:AAFslqcEmnyry5u6ZHmMBLYHe_kfAAOInp4"
-TARGET_TELEGRAM_GROUP_ID = -1004382894214
+TARGET_TELEGRAM_GROUP_ID = -4382894214
 
 # Список ID администраторов и целевой группы
 ADMIN_IDS = [
     294001568,
     210925919,
     860289743,
-    -1003826229666,
+    -4382894214,
 ]
 
 bot = Bot(token=BOT_TOKEN)
@@ -49,11 +49,9 @@ class AdminPrivateOnlyMiddleware(BaseMiddleware):
         user = data.get("event_from_user")
         chat = data.get("event_chat")
 
-        # В группах/супергруппах бот полностью игнорирует входящие сообщения участников
         if chat and chat.type in ["group", "supergroup"]:
             return
 
-        # В личке проверяем права администратора
         if not user or user.id not in ADMIN_IDS:
             if isinstance(event, Message):
                 await event.answer("⛔ У вас нет доступа к этому боту.")
@@ -124,10 +122,10 @@ def save_templates(templates):
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Срез для группы"), KeyboardButton(text="Срез для админки")],
-        [KeyboardButton(text="Срез для наставников"), KeyboardButton(text="Анализ группы")],
-        [KeyboardButton(text="Сравнительный по ГП"), KeyboardButton(text="Сравнительный по ГП неделя")],
-        [KeyboardButton(text="Отчет в группу неделя"), KeyboardButton(text="Загрузить базу тегов")],
-        [KeyboardButton(text="⚙️ Редактировать шаблоны")]
+        [KeyboardButton(text="Заход %"), KeyboardButton(text="Срез для наставников")],
+        [KeyboardButton(text="Анализ группы"), KeyboardButton(text="Сравнительный по ГП")],
+        [KeyboardButton(text="Отчет в группу неделя"), KeyboardButton(text="Сравнительный по ГП неделя")],
+        [KeyboardButton(text="Загрузить базу тегов"), KeyboardButton(text="⚙️ Редактировать шаблоны")]
     ],
     resize_keyboard=True,
 )
@@ -142,9 +140,13 @@ class ReportFSM(StatesGroup):
     waiting_for_mentor_mappings = State()
     waiting_for_mentor_file_before = State()
     waiting_for_mentor_file_after = State()
+    # Ветка Заход %
+    waiting_for_zakhod_file = State()
+    waiting_for_zakhod_group = State()
 
 user_sessions = {}
 cached_group_posts = {}
+cached_text_posts = {}
 
 # ==================== УМНЫЙ МАТЧИНГ ТЕГОВ ====================
 def clean_fio_string(text: str) -> str:
@@ -232,6 +234,226 @@ async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Выберите действие или тип отчета:", reply_markup=main_kb)
 
+# ==================== ВЕТКА «ЗАХОД %» ====================
+@dp.message(F.text == "Заход %")
+async def start_zakhod_flow(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Отправьте Excel-файл со статистикой заходов:")
+    await state.set_state(ReportFSM.waiting_for_zakhod_file)
+
+@dp.message(ReportFSM.waiting_for_zakhod_file, F.document)
+async def handle_zakhod_file(message: Message, state: FSMContext):
+    try:
+        file = await bot.get_file(message.document.file_id)
+        downloaded = await bot.download_file(file.file_path)
+        df = pd.read_excel(io.BytesIO(downloaded.read()))
+
+        user_sessions[message.from_user.id] = {"zakhod_df": df}
+        await message.answer("Введите номер вашей группы для акцента и разбора (например: 17):")
+        await state.set_state(ReportFSM.waiting_for_zakhod_group)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при чтении Excel-файла: {e}")
+        await state.clear()
+
+@dp.message(ReportFSM.waiting_for_zakhod_group)
+async def handle_zakhod_group(message: Message, state: FSMContext):
+    target_group = message.text.strip()
+    session = user_sessions.get(message.from_user.id, {})
+    df = session.get("zakhod_df")
+
+    if df is None:
+        await message.answer("⚠️ Файл не найден. Нажмите «Заход %» заново.")
+        await state.clear()
+        return
+
+    try:
+        report_text = generate_zakhod_report_text(df, target_group)
+        post_key = f"zakhod_{message.chat.id}_{target_group}"
+        cached_text_posts[post_key] = report_text
+
+        send_markup = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="📤 Отправить в группу", callback_data=f"send_text_group:{post_key}")]]
+        )
+
+        for chunk in split_text(report_text):
+            await message.answer(chunk, parse_mode="HTML", reply_markup=send_markup)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при расчете отчета по заходам: {e}")
+    finally:
+        await state.clear()
+
+def fmt_int_space(val) -> str:
+    return f"{int(round(val)):,}".replace(",", " ")
+
+def fmt_pct_comma(val) -> str:
+    return f"{val:.2f}%".replace(".", ",")
+
+def generate_zakhod_report_text(df_raw: pd.DataFrame, target_group: str) -> str:
+    df = df_raw.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    col_op = find_column(df, ["оператор", "фио"])
+    col_resp = find_column(df, ["ответствен"])
+    col_zakhod = next((c for c in df.columns if "всего заходов" in c.lower() and "%" not in c.lower()), None)
+    col_not_eval = find_column(df, ["не удалось"])
+    col_zakhod_pct = next((c for c in df.columns if "всего заходов" in c.lower() and "%" in c.lower()), None)
+    col_calls = find_column(df, ["всего звонков", "звонков"])
+
+    if not col_resp or not col_zakhod or not col_calls:
+        raise ValueError("В файле не найдены обязательные столбцы (Ответственный, Всего заходов, Всего звонков).")
+
+    # Отбрасываем строку Итого и пустые строки
+    df = df[df[col_resp].notnull()].copy()
+    df = df[~df[col_resp].astype(str).str.lower().str.contains("итого")]
+    if col_op:
+        df = df[~df[col_op].astype(str).str.lower().str.contains("итого")]
+
+    df["zakhod_num"] = df[col_zakhod].apply(clean_num_val)
+    df["not_eval_num"] = df[col_not_eval].apply(clean_num_val) if col_not_eval else 0
+    df["calls_num"] = df[col_calls].apply(clean_num_val)
+
+    # Расчет процента заходов по оператору
+    def parse_op_pct(row):
+        if col_zakhod_pct and pd.notnull(row[col_zakhod_pct]):
+            val = clean_num_val(row[col_zakhod_pct])
+            return val * 100 if 0 < val <= 1.0 else val
+        eval_calls = row["calls_num"] - row["not_eval_num"]
+        return (row["zakhod_num"] / eval_calls * 100) if eval_calls > 0 else 0.0
+
+    df["op_pct"] = df.apply(parse_op_pct, axis=1)
+
+    # Извлекаем номер группы и имя РГ из столбца Ответственный
+    def extract_group_info(resp_str):
+        s = str(resp_str).strip()
+        m_num = re.search(r"(\d+)", s)
+        g_num = m_num.group(1) if m_num else s
+        m_lead = re.search(r"\((.*?)\)", s)
+        g_lead = m_lead.group(1).strip() if m_lead else ""
+        return g_num, g_lead
+
+    parsed_info = df[col_resp].apply(extract_group_info)
+    df["group_num"] = [x[0] for x in parsed_info]
+    df["group_lead"] = [x[1] for x in parsed_info]
+
+    # Агрегируем статистику по всем группам в файле
+    groups_summary = []
+    for g_num, g_df in df.groupby("group_num"):
+        lead = g_df["group_lead"].iloc[0]
+        tot_zakhod = g_df["zakhod_num"].sum()
+        tot_not_eval = g_df["not_eval_num"].sum()
+        tot_calls = g_df["calls_num"].sum()
+        eval_calls = tot_calls - tot_not_eval
+        pct = (tot_zakhod / eval_calls * 100) if eval_calls > 0 else 0.0
+
+        groups_summary.append({
+            "group_num": str(g_num),
+            "lead": lead,
+            "zakhod": tot_zakhod,
+            "eval_calls": eval_calls,
+            "calls": tot_calls,
+            "pct": pct
+        })
+
+    # Сортируем группы от лучшей к худшей
+    groups_summary.sort(key=lambda x: x["pct"], reverse=True)
+
+    medals = ["🥇", "🥈", "🥉"]
+    num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+    lines = [
+        "📊 <b>ОБНОВЛЕННЫЙ СРЕЗ ПО ЗАХОДАМ</b> 📊\n",
+        "Заход в скрипт — обязательное условие на каждом звонке. Смотрим актуальную расстановку между группами:\n"
+    ]
+
+    target_idx = None
+    for idx, g in enumerate(groups_summary):
+        rank = idx + 1
+        icon = medals[idx] if idx < len(medals) else (num_emojis[idx] if idx < len(num_emojis) else f"{rank}.")
+        lead_part = f" ({g['lead']})" if g["lead"] else ""
+        lines.append(f"{icon} {rank} место — <b>{g['group_num']} группа</b>{lead_part}")
+        lines.append(f"🎯 Заходы: <b>{fmt_pct_comma(g['pct'])}</b> ({fmt_int_space(g['zakhod'])} из {fmt_int_space(g['eval_calls'])} оц.) | 📞 Звонков: {fmt_int_space(g['calls'])}\n")
+
+        if g["group_num"] == target_group:
+            target_idx = idx
+
+    # Блок акцента по выбранной группе
+    if target_idx is not None:
+        tg = groups_summary[target_idx]
+        t_rank = target_idx + 1
+        accent_parts = [f"⚡️ <b>{tg['group_num']} группа на {t_rank} месте</b> с результатом <b>{fmt_pct_comma(tg['pct'])}</b>"]
+
+        if t_rank > 1:
+            first_g = groups_summary[0]
+            diff_first = first_g["pct"] - tg["pct"]
+            accent_parts.append(f"— отставание от 1 места составляет <b>{diff_first:.2f} п.п.</b>".replace(".", ","))
+
+        if target_idx + 1 < len(groups_summary):
+            next_g = groups_summary[target_idx + 1]
+            diff_next = tg["pct"] - next_g["pct"]
+            accent_parts.append(f", отрыв от {t_rank + 1} места — <b>+{diff_next:.2f} п.п.</b>".replace(".", ","))
+
+        accent_text = "".join(accent_parts) + ". Держим темп и подтягиваем заходы!\n"
+        lines.append(accent_text)
+
+    # Детализация по операторам целевой группы
+    df_target = df[df["group_num"] == target_group].copy()
+    if not df_target.empty and col_op:
+        # Убираем скобки и берем Фамилию Имя
+        def short_fio(full_str):
+            cleaned = clean_fio_string(full_str)
+            parts = cleaned.split()
+            return " ".join(parts[:2]) if len(parts) >= 2 else cleaned
+
+        df_target["short_name"] = df_target[col_op].apply(short_fio)
+
+        # ТОП-5 операторов
+        df_top5 = df_target[df_target["calls_num"] > 0].sort_values(by="op_pct", ascending=False).head(5)
+        if not df_top5.empty:
+            lines.append(f"🔥 <b>ТОП-5 ОПЕРАТОРОВ {target_group} ГРУППЫ</b> (держат стандарт на максимум):")
+            for i, (_, row) in enumerate(df_top5.iterrows()):
+                rank_op = i + 1
+                icon_op = medals[i] if i < len(medals) else (num_emojis[i] if i < len(num_emojis) else f"{rank_op}.")
+                lines.append(
+                    f"{icon_op} {rank_op} место — <b>{row['short_name']}</b>: <b>{fmt_pct_comma(row['op_pct'])}</b> "
+                    f"({fmt_int_space(row['zakhod_num'])} заходов | {fmt_int_space(row['calls_num'])} зв.)"
+                )
+            lines.append("")
+
+        # Зона внимания (< 50%)
+        df_low = df_target[(df_target["calls_num"] > 0) & (df_target["op_pct"] < 50.0)].sort_values(by="op_pct", ascending=True)
+        if not df_low.empty:
+            lines.append("⚠️ <b>ЗОНА ВНИМАНИЯ</b> (тянут процент группы вниз — срочно исправляем):")
+            for _, row in df_low.iterrows():
+                lines.append(
+                    f"🔻 <b>{row['short_name']}</b>: <b>{fmt_pct_comma(row['op_pct'])}</b> "
+                    f"({fmt_int_space(row['zakhod_num'])} заходов | {fmt_int_space(row['calls_num'])} зв.)"
+                )
+
+    return "\n".join(lines).strip()
+
+@dp.callback_query(F.data.startswith("send_text_group:"))
+async def callback_send_text_to_group(call: CallbackQuery):
+    await call.answer("Отправка в группу...")
+    post_key = call.data.split("send_text_group:")[1]
+    text = cached_text_posts.get(post_key)
+
+    if not text:
+        await call.message.answer("⚠️ Данные отчета устарели в памяти. Сформируйте срез заново.")
+        return
+
+    try:
+        for chunk in split_text(text):
+            await bot.send_message(
+                chat_id=TARGET_TELEGRAM_GROUP_ID,
+                text=chunk,
+                parse_mode="HTML"
+            )
+        await call.message.answer("✅ Срез по заходам успешно опубликован в группе!")
+    except Exception as e:
+        error_msg = f"❌ Ошибка отправки в группу:\n<code>{html.escape(str(e))}</code>"
+        await call.message.answer(error_msg, parse_mode="HTML")
+
+# ==================== ШАБЛОНЫ И ТЕГИ ====================
 @dp.message(F.text == "⚙️ Редактировать шаблоны")
 async def cmd_edit_templates(message: Message, state: FSMContext):
     await state.clear()
